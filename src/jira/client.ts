@@ -79,6 +79,17 @@ export class JiraClient implements IssueSource {
     }
   }
 
+  /** One issue's description as Jira renders it (works for Cloud ADF and Server/DC wiki markup alike). */
+  async describe(key: string, signal?: AbortSignal): Promise<{ html: string; updated?: string }> {
+    const res = await this.request<{ fields: { updated?: string }; renderedFields?: { description?: string | null } }>(
+      'GET',
+      `/rest/api/${this.apiVersion}/issue/${encodeURIComponent(key)}?fields=description,updated&expand=renderedFields`,
+      undefined,
+      signal,
+    );
+    return { html: res.renderedFields?.description ?? '', updated: res.fields.updated };
+  }
+
   /** Cloud bulk fetch reports existing issues only; anything missing is deleted or no longer visible. */
   async presence(ids: string[], signal?: AbortSignal): Promise<Map<string, string>> {
     if (this.conn.deployment !== 'cloud') throw new JiraError('bulkfetch is Cloud only', 501);

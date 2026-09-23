@@ -49,6 +49,11 @@ export function viewOptions(): ViewOptions {
     hierarchyMode: c.get<'edges' | 'nested'>('layout.hierarchyMode', 'edges'),
     edgeRouting: c.get<ViewOptions['edgeRouting']>('layout.edgeRouting', 'ORTHOGONAL'),
     typeStyles: c.get<Record<string, TypeStyleOverride>>('issueTypeStyles', {}),
+    hover: {
+      enabled: c.get<boolean>('hoverCard.enabled', true),
+      delayMs: Math.max(0, c.get<number>('hoverCard.delayMs', 1000)),
+      descriptionLines: Math.max(1, c.get<number>('hoverCard.descriptionLines', 4)),
+    },
   };
 }
 

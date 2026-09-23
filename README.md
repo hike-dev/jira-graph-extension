@@ -56,12 +56,19 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Filters.** Click legend entries to hide issue types or link types. You can also hide done issues, or hide single nodes.
 - **Search.** Matches key, title, assignee, status and labels, with Enter cycling through matches.
 - **Minimap**, animated relayout, pan and zoom, and fit to screen.
-- **Details drawer**: status, priority, assignee, labels, parent, children and relations grouped by type, with action buttons.
+- **Ticket hover card** after hovering a ticket for 1 s (`jiraGraph.hoverCard.delayMs`, or turn it off with `jiraGraph.hoverCard.enabled`):
+  - Shows the **description** (fetched on demand, cached until the ticket changes). It's collapsed to 4 lines (`jiraGraph.hoverCard.descriptionLines`) with *Show more*, and the details drawer shows it too. Descriptions come from Jira's rendered HTML and pass an allowlist: formatting, lists, code, quotes, tables and web links survive; images show as placeholders; scripts and other links are dropped.
+  - Shows type, status, full summary, assignee, priority, time in status, sprint, due date (with overdue), points, version, labels and when it was updated.
+  - Also shows its parent, a progress bar over its children, its prerequisite and unlock chains, its relations as clickable keys, and what the current lens says about it.
+  - It stays open when you move into it. Moving to a neighbouring ticket switches quickly. <kbd>I</kbd> toggles it for the hovered or selected ticket; <kbd>Esc</kbd> closes it.
+- **Tooltips** everywhere else, in VS Code's hover style with shortcut keys: toolbar controls (the selectors list every option, with the current one highlighted), legend rows, links, collapse and load buttons, and the live-sync status.
+- **More menu** (⋯): link labels, hide done, links shape the layout, minimap, edge routing, collapse and expand all.
+- **Details drawer** (resizable: drag its left edge, double-click to reset, arrow keys when focused; width remembered): status, priority, assignee, labels, parent, children and relations grouped by type, with action buttons.
 - **Context menu**: open in Jira, load relations, focus, new graph from here, collapse, copy key or link, hide.
 - **Keyboard:**
   - `/` search · `F` fit · `+`/`-`/`0` zoom · `L` / `Shift+L` cycle lens
   - arrows move the selection spatially
-  - `Enter` opens · `E` expands · `Space` collapses · `H` hides · `Esc` clears
+  - `Enter` opens · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `Esc` clears
 - **Export:**
   - standalone themed **SVG**
   - **Mermaid** (paste into PRs, Confluence or Markdown)
@@ -141,6 +148,7 @@ Open graphs stay current without re-fetching everything.
 | `jiraGraph.epicLinkField` | – | Epic Link field id for Server/DC or legacy projects |
 | `jiraGraph.storyPointsField` | – | Shown in the details drawer |
 | `jiraGraph.sprintField` | customfield_10020 | Sprint field used by the Planning lens |
+| `jiraGraph.hoverCard.delayMs` | 1000 | Hover time before the ticket card appears; `jiraGraph.hoverCard.enabled` turns it off |
 | `jiraGraph.sync.*` | see *Live sync* | enabled, idleIntervalSeconds 60, activityDebounceSeconds 2, cooldownSeconds 180, cooldownIntervalSeconds 10, overlapSeconds 300, presenceCheckMinutes 10 |
 | `jiraGraph.layout.*` | DOWN / edges / ORTHOGONAL | Defaults for new graphs |
 | `jiraGraph.issueTypeStyles` | {} | `{ "Tech Debt": { "base": "task", "color": "#8B5CF6", "border": "dashed", "icon": "improvement" } }` |

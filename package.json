@@ -575,6 +575,24 @@
           "default": 10,
           "minimum": 1,
           "description": "How often to check that loaded issues still exist (deleted, no access, or moved to another project)."
+        },
+        "jiraGraph.hoverCard.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a ticket details card when hovering a ticket in the graph."
+        },
+        "jiraGraph.hoverCard.delayMs": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "description": "How long to hover a ticket before its details card appears (milliseconds). Moving to another ticket while a card is open switches quickly."
+        },
+        "jiraGraph.hoverCard.descriptionLines": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 40,
+          "description": "Lines of the ticket description shown before 'Show more' (hover card and details drawer)."
         }
       }
     }

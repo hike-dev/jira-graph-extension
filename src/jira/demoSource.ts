@@ -161,6 +161,23 @@ function buildIssues(): Map<string, RawIssue> {
 }
 
 /** Tiny JQL "interpreter" supporting only what GraphSession generates. */
+const DESCRIPTIONS: Record<string, string> = {
+  'SHOP-21': `<p>Let customers pay with <strong>Apple Pay</strong> and <strong>Google Pay</strong> on web and in the app.</p>
+<h3>Acceptance criteria</h3>
+<ul><li>Wallet button shown only when the device supports it</li><li>Falls back to the card form when the wallet sheet is dismissed</li><li>3DS2 challenge handled by the provider selected in <a href="https://demo.atlassian.net/browse/SHOP-23">SHOP-23</a></li><li>Receipts show the wallet type</li></ul>
+<h3>Notes</h3>
+<p>Merchant certificates are managed in the payments vault. Gateway SDK v5 is required (see PLAT-7).</p>
+<pre><code>POST /payments/wallet
+{ "type": "apple_pay", "token": "…" }</code></pre>
+<p><img src="https://demo.atlassian.net/secure/attachment/1/flow.png" alt="flow.png"/></p>`,
+  'SHOP-24': `<p>When a payment request times out and the customer presses <em>Pay</em> again, two charges can succeed.</p>
+<ol><li>Open checkout on a slow network</li><li>Press Pay, wait for the timeout message</li><li>Press Pay again</li></ol>
+<blockquote>Seen 14 times last week, all on mobile Safari.</blockquote>
+<p>Fix idea: idempotency key per checkout session.</p>`,
+  'SHOP-10': `<p>Replace the three-step checkout with a single page. Goal: <strong>+8% conversion</strong> on mobile.</p>
+<table><tr><th>Metric</th><th>Now</th><th>Target</th></tr><tr><td>Mobile conversion</td><td>2.1%</td><td>2.3%</td></tr><tr><td>Time to pay</td><td>94 s</td><td>60 s</td></tr></table>`,
+};
+
 export class DemoSource implements IssueSource {
   readonly baseUrl = 'https://demo.atlassian.net';
   private readonly issues = buildIssues();
@@ -197,6 +214,13 @@ export class DemoSource implements IssueSource {
     else if (!narrowed) out = out.filter((i) => i.key.startsWith('SHOP-'));
     // Copies, like a real API response: simulated edits must not leak into what callers hold.
     return structuredClone(out);
+  }
+
+  async describe(key: string): Promise<{ html: string; updated?: string }> {
+    await new Promise((r) => setTimeout(r, 250));
+    const i = this.issues.get(key);
+    if (!i) throw new Error(`${key} not found`);
+    return { html: DESCRIPTIONS[key] ?? (i.fields.summary ? `<p>${i.fields.summary}.</p>` : ''), updated: i.fields.updated };
   }
 
   async presence(ids: string[]): Promise<Map<string, string>> {

@@ -92,7 +92,7 @@ export class GraphPanel {
       panel.onDidChangeViewState((e) => e.webviewPanel.active && this.setActive()),
       panel.webview.onDidReceiveMessage((m: WebviewMessage) => this.onMessage(m)),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout')) {
+        if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout') || e.affectsConfiguration('jiraGraph.hoverCard')) {
           if (this.model) this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'update' });
         }
         if (e.affectsConfiguration('jiraGraph.sync')) this.applySyncSettings();
@@ -255,6 +255,13 @@ export class GraphPanel {
       case 'syncNow':
         this.syncNow();
         break;
+      case 'describe':
+        await this.describe(m.key, m.reqId);
+        break;
+      case 'openUrl':
+        // Only web links from rendered descriptions; never file:, command: or javascript: URIs.
+        if (/^https?:\/\//i.test(m.url)) void vscode.env.openExternal(vscode.Uri.parse(m.url));
+        break;
       case 'openIssue':
         void vscode.commands.executeCommand('jiraGraph.openInBrowser', m.key);
         break;
@@ -290,6 +297,36 @@ export class GraphPanel {
         }
         break;
       }
+    }
+  }
+
+  /** Descriptions are fetched on demand and cached until the issue's `updated` changes. */
+  private readonly descriptions = new Map<string, { updated?: string; html: string }>();
+  /** Latest request per key: a slower, older response must not overwrite a newer one. */
+  private readonly describeSeq = new Map<string, number>();
+
+  private async describe(key: string, reqId: number) {
+    this.describeSeq.set(key, reqId);
+    const issue = this.model?.issues.find((i) => i.key === key);
+    const cached = this.descriptions.get(key);
+    if (cached && (!issue?.updated || cached.updated === issue.updated)) {
+      this.post({ type: 'description', key, reqId, html: cached.html, updated: cached.updated });
+      return;
+    }
+    const src = this.session?.issues;
+    if (!src?.describe) {
+      this.post({ type: 'description', key, reqId, html: '' });
+      return;
+    }
+    try {
+      const d = await src.describe(key);
+      if (this.describeSeq.get(key) !== reqId) return; // superseded while in flight
+      const prev = this.descriptions.get(key);
+      if (!prev || !prev.updated || !d.updated || Date.parse(d.updated) >= Date.parse(prev.updated)) this.descriptions.set(key, d);
+      this.post({ type: 'description', key, reqId, html: d.html, updated: d.updated });
+    } catch (e) {
+      if (this.describeSeq.get(key) !== reqId) return;
+      this.post({ type: 'description', key, reqId, error: (e as Error).message });
     }
   }
 

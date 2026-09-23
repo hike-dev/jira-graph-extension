@@ -44,4 +44,6 @@ export interface IssueSource {
    * Optional: without it the session falls back to `id in (...)` searches.
    */
   presence?(ids: string[], signal?: AbortSignal): Promise<Map<string, string>>;
+  /** Description rendered to HTML by Jira (untrusted — sanitised by the webview), fetched on demand. */
+  describe?(key: string, signal?: AbortSignal): Promise<{ html: string; updated?: string }>;
 }

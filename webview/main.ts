@@ -4,6 +4,9 @@ import { GROUP_HEADER, layout, LayoutEdge, LayoutNode, LayoutResult, LayoutStrat
 import { computeLens, fmtAge, hasSprintData, LensId, LensMark, LENSES } from './lens';
 import { dashArray, ICONS, iconMarkup, LINK_LABELS, PRIORITY, TypeStyle, TypeStyles } from './typeStyles';
 import cssText from './styles.css';
+import { descriptionBlock, DescriptionState, fitDescription, HoverCard } from './hovercard';
+import { sanitizeDescription } from './sanitize';
+import { Tooltips } from './tooltip';
 
 // Inline (same-origin) stylesheet: lets SVG export read the rules back via CSSOM.
 const styleEl = document.createElement('style');
@@ -35,6 +38,7 @@ interface UiState {
   linkVisibility?: 'all' | 'selection' | 'auto';
   lens?: LensId;
   strategy?: LayoutStrategy;
+  drawerWidth?: number;
 }
 interface Persisted {
   source?: GraphSource;
@@ -106,57 +110,43 @@ const app = document.getElementById('app')!;
 app.innerHTML = `
 <header class="toolbar">
   <div class="title"><span class="title-text">Jira Graph</span><span class="stats"></span></div>
-  <button class="live" data-action="syncNow" title="Live sync"><span class="dot"></span><span class="live-text">live</span></button>
+  <button class="live" data-action="syncNow" data-tip-fn="live" aria-label="Live sync"><span class="dot"></span><span class="live-text">live</span></button>
   <div class="spacer"></div>
-  <label class="search"><input type="search" placeholder="Search key, title, assignee, label…" spellcheck="false" /><span class="count"></span></label>
+  <label class="search"><input type="search" placeholder="Search key, title, assignee, label…" spellcheck="false" data-tip="Search" data-kbd="/" data-tip-desc="Dims everything else. Enter jumps to the next match, Esc clears." /><span class="count"></span></label>
   <div class="seg" data-opt="mode">
-    <button data-v="edges" title="Hierarchy as edges">${UI_ICONS.tree}</button>
-    <button data-v="nested" title="Hierarchy as nested containers">${UI_ICONS.nested}</button>
+    <button data-v="edges" data-tip="Tree" data-tip-desc="Parent → child drawn as edges in a layered layout" aria-label="Tree layout">${UI_ICONS.tree}</button>
+    <button data-v="nested" data-tip="Nested" data-tip-desc="Children drawn inside their parent: initiative ⊃ epic ⊃ story ⊃ sub-task" aria-label="Nested layout">${UI_ICONS.nested}</button>
   </div>
   <div class="seg" data-opt="direction">
-    <button data-v="DOWN" title="Top → bottom">${UI_ICONS.down}</button>
-    <button data-v="RIGHT" title="Left → right">${UI_ICONS.right}</button>
+    <button data-v="DOWN" data-tip="Top → bottom" data-tip-desc="Parents and blockers above what they lead to" aria-label="Top to bottom">${UI_ICONS.down}</button>
+    <button data-v="RIGHT" data-tip="Left → right" data-tip-desc="Reads like a timeline or tech tree" aria-label="Left to right">${UI_ICONS.right}</button>
   </div>
-  <select data-opt="strategy" title="Layout strategy">
+  <select data-opt="strategy" data-tip-fn="strategy" aria-label="Layout strategy">
     <option value="explicit">View: explicit</option>
     <option value="hybrid">View: hybrid</option>
     <option value="compact">View: compact</option>
   </select>
-  <select data-opt="lens" title="Lens: highlight what matters for a question (L cycles)">
+  <select data-opt="lens" data-tip-fn="lens" aria-label="Lens">
     <option value="none">Lens: none</option>
     <option value="progress">Lens: progress</option>
     <option value="completion">Lens: completion</option>
     <option value="planning">Lens: planning</option>
   </select>
-  <select data-opt="linkVisibility" title="Which cross links are drawn">
+  <select data-opt="linkVisibility" data-tip-fn="links" aria-label="Link visibility">
     <option value="auto">Links: auto</option>
     <option value="all">Links: all</option>
     <option value="selection">Links: selected only</option>
   </select>
-  <select data-opt="routing" title="Edge routing">
-    <option value="ORTHOGONAL">Orthogonal</option>
-    <option value="SPLINES">Splines</option>
-    <option value="POLYLINE">Polyline</option>
-  </select>
   <div class="group">
-    <button class="toggle" data-toggle="showLabels" title="Link labels">${UI_ICONS.labels}</button>
-    <button class="toggle" data-toggle="hideDone" title="Hide done issues">${UI_ICONS.done}</button>
-    <button class="toggle" data-toggle="linksAffectLayout" title="Cross links shape the layout (off: hierarchy-only layout, links drawn on top)">${UI_ICONS.magnet}</button>
-    <button class="toggle" data-toggle="minimap" title="Minimap">${UI_ICONS.minimap}</button>
+    <button data-action="zoomOut" data-tip="Zoom out" data-kbd="−" aria-label="Zoom out">${UI_ICONS.zoomOut}</button>
+    <button data-action="zoomReset" class="zoom-level" data-tip="Reset zoom to 100%" data-kbd="0" data-tip-desc="Scroll or pinch to zoom around the cursor" aria-label="Reset zoom">100%</button>
+    <button data-action="zoomIn" data-tip="Zoom in" data-kbd="+" aria-label="Zoom in">${UI_ICONS.zoomIn}</button>
+    <button data-action="fit" data-tip="Fit to screen" data-kbd="F" aria-label="Fit to screen">${UI_ICONS.fit}</button>
   </div>
   <div class="group">
-    <button data-action="collapseAll" title="Collapse to top level">${UI_ICONS.collapse}</button>
-    <button data-action="expandAll" title="Expand all groups">${UI_ICONS.expand}</button>
-  </div>
-  <div class="group">
-    <button data-action="zoomOut" title="Zoom out (-)">${UI_ICONS.zoomOut}</button>
-    <button data-action="zoomReset" class="zoom-level" title="Reset zoom (0)">100%</button>
-    <button data-action="zoomIn" title="Zoom in (+)">${UI_ICONS.zoomIn}</button>
-    <button data-action="fit" title="Fit to screen (F)">${UI_ICONS.fit}</button>
-  </div>
-  <div class="group">
-    <button data-action="export" title="Export">${UI_ICONS.export}</button>
-    <button data-action="refresh" title="Reload from Jira">${UI_ICONS.refresh}</button>
+    <button data-action="export" data-tip="Export" data-tip-desc="SVG image, Mermaid diagram, visible keys or a key-in JQL" aria-label="Export">${UI_ICONS.export}</button>
+    <button data-action="refresh" data-tip="Reload from Jira" data-tip-desc="Full reload of the query. Changes normally arrive through live sync." aria-label="Reload">${UI_ICONS.refresh}</button>
+    <button data-action="more" data-tip="More view options" data-tip-desc="Link labels, hide done, layout by links, minimap, edge routing, collapse / expand all" aria-label="More view options">${UI_ICONS.more}</button>
   </div>
 </header>
 <div class="progress"><div></div></div>
@@ -167,8 +157,9 @@ app.innerHTML = `
     <g class="viewport"><g class="l-groups"></g><g class="l-edges"></g><g class="l-labels"></g><g class="l-nodes"></g></g>
   </svg>
   <section class="legend"></section>
-  <canvas class="minimap" width="200" height="130"></canvas>
+  <canvas class="minimap" width="200" height="130" data-tip="Minimap" data-tip-desc="Click or drag to move the view"></canvas>
   <aside class="drawer"></aside>
+  <div class="drawer-resizer" role="separator" aria-orientation="vertical" aria-label="Resize details panel" tabindex="0" data-tip="Resize details panel" data-tip-desc="Drag to resize · double-click to reset\nArrow keys when focused (Shift: faster)"></div>
   <div class="overlay"></div>
   <div class="menu" role="menu"></div>
   <div class="toast"></div>
@@ -192,6 +183,60 @@ const menu = $<HTMLElement>('.menu');
 const toastEl = $<HTMLElement>('.toast');
 const minimap = $<HTMLCanvasElement>('.minimap');
 const searchInput = $<HTMLInputElement>('.search input');
+const tips = new Tooltips(app);
+/** Sanitised descriptions by key; fetched on demand, dropped when the issue changes. */
+const descriptions = new Map<string, DescriptionState>();
+let descriptionLines = 4;
+let drawerDescExpanded = false;
+/** Latest request id per key; responses to older requests are ignored. */
+const descRequests = new Map<string, number>();
+let descSeq = 0;
+/** A failed fetch is shown, but retried when the ticket is shown again after this long. */
+const DESC_RETRY_MS = 5000;
+const descFailedAt = new Map<string, number>();
+
+/** Whether the ticket's description should be (re)fetched now. */
+function needsDescription(key: string): boolean {
+  const cur = descriptions.get(key);
+  if (!cur) return true;
+  return 'error' in cur && Date.now() - (descFailedAt.get(key) ?? 0) > DESC_RETRY_MS;
+}
+
+function requestDescription(key: string, force = false) {
+  if (!force && !needsDescription(key)) return;
+  const reqId = ++descSeq;
+  descRequests.set(key, reqId);
+  descriptions.set(key, { loading: true });
+  post({ type: 'describe', key, reqId });
+}
+
+/** Forget every description (full reload): each is re-requested when shown; the host re-validates by `updated`. */
+function resetDescriptions() {
+  descriptions.clear();
+  descRequests.clear();
+  descFailedAt.clear();
+}
+const card = new HoverCard(stage, {
+  issue: (k) => byKey.get(k),
+  links: () => model?.links ?? [],
+  childrenOf: (k) => childrenOf.get(k) ?? [],
+  rollup: (k) => rollups.get(k),
+  blocked: (k) => blocked.has(k),
+  lens: (k) => lensMarks.get(k),
+  lensLabel: () => ((ui.lens ?? 'none') === 'none' ? undefined : LENSES[ui.lens!].label),
+  chain: (k) => chainOf(k, model?.links ?? []),
+  styleOf,
+  avatarColor,
+  initials,
+  anchor: (k) => nodeEls.get(k)?.querySelector('.g-card, .g-group-head') ?? nodeEls.get(k),
+  onReveal: (k) => revealKey(k),
+  onOpen: (k) => post({ type: 'openIssue', key: k }),
+  onUrl: (url) => post({ type: 'openUrl', url }),
+  description: (k) => descriptions.get(k),
+  requestDescription: (k) => requestDescription(k),
+  needsDescription,
+  descriptionLines: () => descriptionLines,
+});
 
 function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number | undefined> = {}, parent?: Element | null): SVGElementTagNameMap[K] {
   const e = document.createElementNS(NS, tag);
@@ -389,6 +434,7 @@ async function relayout(opts: { fit?: boolean } = {}) {
     return;
   }
   if (token !== layoutToken) return;
+  card.hide();
   lay = result;
   render();
   renderLegend();
@@ -468,8 +514,8 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
   ].filter(Boolean).join(' '));
   g.style.setProperty('--type', s.color);
 
-  const title = el('title', {}, g);
-  title.textContent = `${i.key} · ${i.type} · ${i.status}\n${i.summary}${i.assignee ? `\n👤 ${i.assignee}` : ''}${i.loaded ? '' : '\n(not loaded — double-click to expand)'}`;
+  // Details come from the hover card; the node itself carries no native tooltip.
+  g.setAttribute('aria-label', `${i.key} ${i.type} ${i.status}: ${i.summary}`);
 
   el('rect', { class: 'g-select', x: -5, y: -5, width: w + 10, height: n.h + 10, rx: s.radius + 5 }, g);
   const lensMark = lensMarks.get(i.key);
@@ -513,7 +559,6 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
   const pr = i.priority ? PRIORITY[i.priority.toLowerCase()] : undefined;
   if (pr) {
     const p = el('path', { class: 'g-priority', d: pr.path, transform: `translate(${cursor} 15)`, stroke: pr.color }, det);
-    el('title', {}, p).textContent = `Priority: ${i.priority}`;
     cursor += 16;
   }
 
@@ -530,7 +575,6 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
     const av = el('g', { class: 'g-avatar', transform: `translate(${right - 10} 20)` }, det);
     el('circle', { r: 10, fill: avatarColor(i.assignee) }, av);
     el('text', { y: 3.6 }, av).textContent = initials(i.assignee);
-    el('title', {}, av).textContent = i.assignee;
   }
 
   // Summary (HTML for wrapping + ellipsis)
@@ -551,7 +595,6 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
       const bg = el('g', { class: `g-lbadge tone-${b.tone}`, transform: `translate(${bx} ${by})` }, g);
       el('rect', { width: bw, height: 16, rx: 8 }, bg);
       el('text', { x: bw / 2, y: 11.5 }, bg).textContent = b.text;
-      el('title', {}, bg).textContent = b.title;
       bx += bw + 4;
     }
     badgesEnd = bx;
@@ -572,7 +615,6 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
       if (segW > 0) el('rect', { class: `seg st-${cat}`, x, width: segW, height: 3, rx: 1.5 }, bar);
       x += segW;
     }
-    el('title', {}, bar).textContent = `${r.done}/${total} done · ${r.indeterminate} in progress · ${r.new} to do`;
   }
 
   // Badges
@@ -580,7 +622,6 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
     const b = el('g', { class: 'g-badge blocked', transform: `translate(${w - 2} -2)` }, g);
     el('circle', { r: 9 }, b);
     el('rect', { x: -4.5, y: -1.4, width: 9, height: 2.8, rx: 1 }, b);
-    el('title', {}, b).textContent = 'Blocked by an unresolved issue';
   }
   const kids = childrenOf.get(i.key)?.length ?? 0;
   if (kids) {
@@ -591,13 +632,17 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
     const t = el('g', { class: `g-toggle${isCollapsed ? ' collapsed' : ''}`, transform: `translate(${tx} ${ty})` }, g);
     el('rect', { width: tw, height: 18, rx: 9 }, t);
     el('text', { x: tw / 2, y: 12.6 }, t).textContent = label;
-    el('title', {}, t).textContent = isCollapsed ? `Expand ${kids} children` : `Collapse ${kids} children`;
+    t.setAttribute('data-tip', isCollapsed ? `Expand ${kids} children` : `Collapse ${kids} children`);
+    t.setAttribute('data-kbd', 'Space');
+    t.setAttribute('data-tip-desc', isCollapsed ? 'Show the tickets inside' : 'Fold them into this ticket; their links move here');
   }
   if (!i.loaded) {
     const x = el('g', { class: 'g-expand', transform: `translate(${w} ${h / 2})` }, g);
     el('circle', { r: 10 }, x);
     el('path', { d: 'M-4.5 0h9M0-4.5v9' }, x);
-    el('title', {}, x).textContent = 'Load this issue and its relations';
+    x.setAttribute('data-tip', 'Load this ticket');
+    x.setAttribute('data-kbd', 'E');
+    x.setAttribute('data-tip-desc', 'It was found through a relation; load it with its parent, children and links');
   }
 }
 
@@ -607,7 +652,11 @@ function drawEdge(e: LayoutEdge) {
   el('path', { class: 'hit', d }, g);
   el('path', { class: 'line', d, 'marker-end': e.kind === 'relates' ? undefined : `url(#m-${e.kind})` }, g);
   const nm = (k: string) => (k.startsWith('__fan:') ? `${lay?.frames.find((f) => f.id === k)?.members?.length ?? ''} tickets` : k);
-  el('title', {}, g).textContent = e.kind !== 'hierarchy' ? `${nm(e.from)} ${e.label} ${nm(e.to)}` : e.to.startsWith('__grid:') ? `${e.from} → its packed children` : `${e.from} is parent of ${e.to}`;
+  const summ = (k: string) => byKey.get(k)?.summary ?? '';
+  const head = e.kind !== 'hierarchy' ? `${nm(e.from)} ${e.label} ${nm(e.to)}` : e.to.startsWith('__grid:') ? `${e.from} → its packed children` : `${e.from} is parent of ${e.to}`;
+  g.setAttribute('data-tip', head);
+  const desc = [summ(e.from) && `${e.from}: ${summ(e.from)}`, summ(e.to) && `${e.to}: ${summ(e.to)}`].filter(Boolean).join('\n');
+  if (desc) g.setAttribute('data-tip-desc', desc);
   if (e.labelPos && e.label) {
     const lw = measure(e.label) + 10;
     const lg = el('g', { class: `g-elabel k-${e.kind}`, transform: `translate(${e.labelPos.x} ${e.labelPos.y})`, 'data-from': e.from, 'data-to': e.to }, layers.labels);
@@ -741,7 +790,9 @@ function applyClasses() {
 }
 
 function select(key: string | undefined, opts: { center?: boolean; notify?: boolean } = {}) {
+  if (key !== selected) drawerDescExpanded = false;
   selected = key;
+  if (key && card.openKey === key) card.hide();
   applyClasses();
   renderDrawer();
   if (key && opts.center) centerOn(key);
@@ -824,6 +875,7 @@ const keyAt = (t: EventTarget | null) => (t as Element | null)?.closest?.<SVGGEl
 // Dragging pans from anywhere, including on top of tickets. A press without movement stays a click.
 svg.addEventListener('pointerdown', (e) => {
   hideMenu();
+  card.hide();
   if (e.button !== 0) return;
   pan = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
 });
@@ -835,6 +887,8 @@ svg.addEventListener('pointermove', (e) => {
     if (Math.abs(dx) + Math.abs(dy) <= 4) return;
     // Capture only once it is a drag: capturing on press would retarget the click away from the ticket.
     pan.moved = true;
+    card.hide();
+    tips.suppress(true);
     svg.setPointerCapture(e.pointerId);
     svg.classList.add('panning');
   }
@@ -853,11 +907,13 @@ const endPan = (e: PointerEvent) => {
   }
   pan = undefined;
   svg.classList.remove('panning');
+  tips.suppress(false);
 };
 svg.addEventListener('pointerup', endPan);
 svg.addEventListener('pointercancel', endPan);
 svg.addEventListener('wheel', (e) => {
   e.preventDefault();
+  card.hide();
   anim++;
   // Scroll (and pinch) zooms around the cursor; Shift+scroll pans.
   if (e.shiftKey) {
@@ -907,10 +963,16 @@ svg.addEventListener('pointerover', (e) => {
     hovered = key;
     applyClasses();
   }
+  // Ticket card: not over a container's body, not while dragging, not for the ticket already in the drawer.
+  const onGroupBody = (e.target as Element).classList?.contains('g-group-bg');
+  const inDrawer = key === selected && stage.classList.contains('drawer-open');
+  if (key && !onGroupBody && !inDrawer && !pan && !menu.classList.contains('open')) card.enter(key);
+  else card.leave();
 });
 svg.addEventListener('pointerleave', () => {
   hovered = undefined;
   applyClasses();
+  card.leave();
 });
 
 function toggleCollapse(key: string) {
@@ -962,7 +1024,7 @@ function showMenu(key: string, x: number, y: number) {
 }
 
 function hideMenu() {
-  menu.classList.remove('open');
+  menu.classList.remove('open', 'more');
 }
 
 function hideKey(key: string) {
@@ -977,6 +1039,63 @@ function setFocus(key: string | undefined, hops = 2) {
 }
 
 // ── Drawer (details) ────────────────────────────────────────────────────────
+const DRAWER_DEFAULT = 360;
+const DRAWER_MIN = 280;
+const resizer = $<HTMLElement>('.drawer-resizer');
+
+function drawerMax(): number {
+  return Math.max(DRAWER_MIN, Math.round(stage.clientWidth * 0.75));
+}
+
+function setDrawerWidth(w: number, persist = false) {
+  const width = Math.round(Math.min(drawerMax(), Math.max(DRAWER_MIN, w)));
+  stage.style.setProperty('--drawer-w', `${width}px`);
+  resizer.setAttribute('aria-valuenow', String(width));
+  resizer.setAttribute('aria-valuemin', String(DRAWER_MIN));
+  resizer.setAttribute('aria-valuemax', String(drawerMax()));
+  drawMinimap();
+  if (persist) {
+    ui.drawerWidth = width;
+    saveState();
+  }
+}
+resizer.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    resizer.setPointerCapture(e.pointerId);
+  } catch {
+    // Capture can be refused (e.g. the pointer is already gone); dragging still works while over the handle.
+  }
+  stage.classList.add('resizing');
+  card.hide();
+  tips.suppress(true);
+  const right = stage.getBoundingClientRect().right;
+  const move = (ev: PointerEvent) => setDrawerWidth(right - ev.clientX);
+  const up = () => {
+    resizer.removeEventListener('pointermove', move);
+    stage.classList.remove('resizing');
+    tips.suppress(false);
+    setDrawerWidth(drawer.offsetWidth, true);
+  };
+  resizer.addEventListener('pointermove', move);
+  resizer.addEventListener('pointerup', up, { once: true });
+  resizer.addEventListener('pointercancel', up, { once: true });
+});
+resizer.addEventListener('dblclick', () => setDrawerWidth(DRAWER_DEFAULT, true));
+resizer.addEventListener('keydown', (e) => {
+  const step = e.shiftKey ? 64 : 16;
+  if (e.key === 'ArrowLeft') setDrawerWidth(drawer.offsetWidth + step, true);
+  else if (e.key === 'ArrowRight') setDrawerWidth(drawer.offsetWidth - step, true);
+  else if (e.key === 'Home') setDrawerWidth(DRAWER_DEFAULT, true);
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+});
+// Keep the drawer within bounds when the panel shrinks.
+window.addEventListener('resize', () => setDrawerWidth(ui.drawerWidth ?? DRAWER_DEFAULT));
+
 function chainSummary(key: string): string {
   if (!model) return '';
   const { up, down } = chainOf(key, model.links);
@@ -1023,6 +1142,7 @@ function renderDrawer() {
     </div>
     <h3 class="d-summary">${esc(i.summary || '(not loaded)')}</h3>
     ${chainSummary(i.key)}
+    ${i.loaded ? descriptionBlock(descriptions.get(i.key), descriptionLines, drawerDescExpanded) : ''}
     ${blocked.has(i.key) ? `<div class="d-alert">${UI_ICONS.warn}<span>Blocked by an unresolved issue</span></div>` : ''}
     <dl class="d-grid">
       <dt>Status</dt><dd><span class="pill st-${i.statusCategory}">${esc(i.status || '—')}</span></dd>
@@ -1049,6 +1169,18 @@ function renderDrawer() {
     ${[...grouped].map(([t, keys]) => group(t, keys)).join('')}
     ${i.loaded ? '' : '<p class="d-note">This issue was discovered through a relation and has not been loaded yet.</p>'}
   `;
+  if (i.loaded) requestDescription(i.key);
+  fitDescription(drawer);
+  drawer.querySelector('[data-desc-toggle]')?.addEventListener('click', () => {
+    drawerDescExpanded = !drawerDescExpanded;
+    renderDrawer();
+  });
+  drawer.querySelectorAll<HTMLElement>('[data-url]').forEach((a) =>
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      post({ type: 'openUrl', url: a.dataset.url! });
+    }),
+  );
   drawer.querySelector('.d-close')!.addEventListener('click', () => select(undefined));
   drawer.querySelector('[data-open]')!.addEventListener('click', (e) => {
     e.preventDefault();
@@ -1158,18 +1290,18 @@ function renderLegend() {
     .sort((a, b) => b.count - a.count)
     .map(({ style: s, count }) => {
       const off = ui.hiddenTypes.includes(s.key);
-      return `<button class="row${off ? ' off' : ''}" data-type="${esc(s.key)}" title="Click to ${off ? 'show' : 'hide'}">${iconMarkup(s, 16)}${borderSample(s)}<span>${esc(s.label)}</span><em>${count}</em></button>`;
+      return `<button class="row${off ? ' off' : ''}" data-type="${esc(s.key)}" data-tip="${esc(s.label)} · ${count}" data-tip-desc="${esc(`${s.border === 'double' ? 'Double' : s.border[0].toUpperCase() + s.border.slice(1)} ${s.color} border.\nClick to ${off ? 'show' : 'hide'} these tickets.`)}">${iconMarkup(s, 16)}${borderSample(s)}<span>${esc(s.label)}</span><em>${count}</em></button>`;
     })
     .join('');
   const rows: string[] = [];
   if (ui.mode === 'edges' && hierarchyCount) {
-    rows.push(`<button class="row${ui.showHierarchy ? '' : ' off'}" data-hier="1">${lineSample('hierarchy')}<span>${LINK_LABELS.hierarchy}</span><em>${hierarchyCount}</em></button>`);
+    rows.push(`<button class="row${ui.showHierarchy ? '' : ' off'}" data-hier="1" data-tip="Parent → child · ${hierarchyCount}" data-tip-desc="Click to ${ui.showHierarchy ? 'hide' : 'show'} hierarchy edges (Tree mode)">${lineSample('hierarchy')}<span>${LINK_LABELS.hierarchy}</span><em>${hierarchyCount}</em></button>`);
   }
   for (const k of ['blocks', 'relates', 'duplicates', 'clones', 'other'] as LinkCategory[]) {
     const c = linkCounts.get(k);
     if (!c) continue;
     const off = ui.hiddenLinks.includes(k);
-    rows.push(`<button class="row${off ? ' off' : ''}" data-link="${k}">${lineSample(k)}<span>${LINK_LABELS[k]}</span><em>${c}</em></button>`);
+    rows.push(`<button class="row${off ? ' off' : ''}" data-link="${k}" data-tip="${LINK_LABELS[k]} · ${c}" data-tip-desc="Click to ${off ? 'show' : 'hide'} these links">${lineSample(k)}<span>${LINK_LABELS[k]}</span><em>${c}</em></button>`);
   }
 
   legend.classList.toggle('collapsed', !ui.legendOpen);
@@ -1180,8 +1312,8 @@ function renderLegend() {
       <h5>Issue types</h5>${typeRows}
       ${rows.length ? `<h5>Relations</h5>${rows.join('')}` : ''}
       <h5>Status</h5>
-      <div class="statuses"><span class="pill st-new">To do</span><span class="pill st-indeterminate">In progress</span><span class="pill st-done">Done</span></div>
-      <div class="badges"><span class="badge-blocked"></span> blocked <span class="badge-stub"></span> not loaded</div>
+      <div class="statuses"><span class="pill st-new" data-tip="To do" data-tip-desc="Status category “To Do”: grey stripe and pill">To do</span><span class="pill st-indeterminate" data-tip="In progress" data-tip-desc="Any in-progress status (In Progress, In Review, …): blue stripe and tint">In progress</span><span class="pill st-done" data-tip="Done" data-tip-desc="Status category “Done”: green stripe, key struck through">Done</span></div>
+      <div class="badges"><span data-tip="Blocked" data-tip-desc="Red badge: an open ticket blocks this open ticket"><span class="badge-blocked"></span> blocked</span> <span data-tip="Not loaded" data-tip-desc="Hatched card: found through a relation; press + or double-click to load"><span class="badge-stub"></span> not loaded</span></div>
       <p class="help">Scroll / pinch to zoom · drag anywhere or Shift+scroll to pan · <kbd>L</kbd> lens · double-click opens · right-click for actions · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
     </div>`;
   legend.querySelector('.legend-head')!.addEventListener('click', () => {
@@ -1382,7 +1514,6 @@ function syncToolbar() {
     const opt = seg.dataset.opt as 'mode' | 'direction';
     seg.querySelectorAll<HTMLButtonElement>('button').forEach((b) => b.classList.toggle('on', b.dataset.v === ui[opt]));
   });
-  $<HTMLSelectElement>('select[data-opt="routing"]').value = ui.routing;
   $<HTMLSelectElement>('select[data-opt="linkVisibility"]').value = ui.linkVisibility ?? 'auto';
   $<HTMLSelectElement>('select[data-opt="lens"]').value = ui.lens ?? 'none';
   $<HTMLSelectElement>('select[data-opt="strategy"]').value = ui.strategy ?? 'hybrid';
@@ -1425,21 +1556,68 @@ $<HTMLSelectElement>('select[data-opt="linkVisibility"]').addEventListener('chan
   render();
   renderBanner();
 });
-$<HTMLSelectElement>('select[data-opt="routing"]').addEventListener('change', (e) => {
-  ui.routing = (e.target as HTMLSelectElement).value as UiState['routing'];
+type ToggleKey = 'showLabels' | 'hideDone' | 'linksAffectLayout' | 'minimap';
+function toggleOpt(k: ToggleKey) {
+  ui[k] = !ui[k];
+  saveState();
+  syncToolbar();
+  if (k === 'minimap') drawMinimap();
+  else void relayout({ fit: k === 'linksAffectLayout' });
+}
+
+function setRouting(r: UiState['routing']) {
+  ui.routing = r;
   saveState();
   void relayout();
-});
-app.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) =>
-  b.addEventListener('click', () => {
-    const k = b.dataset.toggle as 'showLabels' | 'hideDone' | 'linksAffectLayout' | 'minimap';
-    ui[k] = !ui[k];
-    saveState();
-    syncToolbar();
-    if (k === 'minimap') drawMinimap();
-    else void relayout({ fit: k === 'linksAffectLayout' });
-  }),
-);
+}
+
+/** Labelled view options: clearer than a row of icon toggles, and keeps the toolbar on one line. */
+function showMoreMenu(x: number, y: number) {
+  type Item = { label: string; desc?: string; on?: boolean; kbd?: string; run: () => void } | 'sep' | { heading: string };
+  const items: Item[] = [
+    { label: 'Link labels', desc: 'Relation names on links', on: ui.showLabels, run: () => toggleOpt('showLabels') },
+    { label: 'Hide done', desc: 'Hide tickets in a Done status', on: ui.hideDone, run: () => toggleOpt('hideDone') },
+    { label: 'Links shape the layout', desc: 'Off: hierarchy only, links on top', on: ui.linksAffectLayout, run: () => toggleOpt('linksAffectLayout') },
+    { label: 'Minimap', on: ui.minimap, run: () => toggleOpt('minimap') },
+    'sep',
+    { heading: 'Edge routing' },
+    { label: 'Orthogonal', on: ui.routing === 'ORTHOGONAL', run: () => setRouting('ORTHOGONAL') },
+    { label: 'Splines', on: ui.routing === 'SPLINES', run: () => setRouting('SPLINES') },
+    { label: 'Polyline', on: ui.routing === 'POLYLINE', run: () => setRouting('POLYLINE') },
+    'sep',
+    { label: 'Collapse all', desc: 'Fold every parent', run: () => runAction('collapseAll') },
+    { label: 'Expand all', run: () => runAction('expandAll') },
+  ];
+  menu.innerHTML = items
+    .map((it, i) =>
+      it === 'sep' ? '<hr/>'
+      : 'heading' in it ? `<div class="menu-title">${esc(it.heading)}</div>`
+      : `<button data-i="${i}" role="menuitemcheckbox" aria-checked="${!!it.on}"><span class="check">${it.on ? UI_ICONS.check : ''}</span><span>${esc(it.label)}${it.desc ? `<small>${esc(it.desc)}</small>` : ''}</span></button>`,
+    )
+    .join('');
+  menu.querySelectorAll<HTMLButtonElement>('button').forEach((btn) =>
+    btn.addEventListener('click', () => {
+      hideMenu();
+      (items[Number(btn.dataset.i)] as { run: () => void }).run();
+    }),
+  );
+  menu.classList.add('open', 'more');
+  const r = stage.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x - r.left, r.width - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(4, y - r.top)}px`;
+}
+
+function runAction(a: string) {
+  if (a === 'collapseAll') {
+    // Collapsing every parent gives progressive disclosure: expanding one level reveals collapsed children.
+    for (const k of childrenOf.keys()) collapsed.add(k);
+    void relayout({ fit: true });
+  }
+  if (a === 'expandAll') {
+    collapsed.clear();
+    void relayout({ fit: true });
+  }
+}
 app.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((b) =>
   b.addEventListener('click', (e) => {
     const a = b.dataset.action;
@@ -1449,14 +1627,10 @@ app.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((b) =>
     if (a === 'fit') fit();
     if (a === 'refresh') post({ type: 'refresh' });
     if (a === 'syncNow') post({ type: 'syncNow' });
-    if (a === 'collapseAll') {
-      // Collapsing every parent gives progressive disclosure: expanding one level reveals collapsed children.
-      for (const k of childrenOf.keys()) collapsed.add(k);
-      void relayout({ fit: true });
-    }
-    if (a === 'expandAll') {
-      collapsed.clear();
-      void relayout({ fit: true });
+    if (a === 'more') {
+      const r = b.getBoundingClientRect();
+      showMoreMenu(r.right - 260, r.bottom + 4);
+      e.stopPropagation();
     }
     if (a === 'export') {
       const r = b.getBoundingClientRect();
@@ -1501,6 +1675,8 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === '+' || e.key === '=') zoomAt(1.2);
   else if (e.key === '-') zoomAt(1 / 1.2);
   else if (e.key === '0') zoomAt(1 / view.k);
+  else if (e.key === 'Escape' && card.openKey) card.hide();
+  else if ((e.key === 'i' || e.key === 'I') && (hovered ?? selected)) card.toggleNow((hovered ?? selected)!);
   else if (e.key === 'Escape') {
     hideMenu();
     if (highlight) (highlight = undefined), applyClasses();
@@ -1645,16 +1821,59 @@ function renderLive() {
   const label = st.phase === 'off' ? 'sync off' : st.phase === 'paused' ? 'paused' : st.syncing ? 'syncing…' : `live · ${ago(st.lastSyncAt)}`;
   $<HTMLElement>('.live-text').textContent = st.error ? 'sync error' : label;
   const next = st.nextRunAt ? Math.max(0, Math.round((st.nextRunAt - Date.now()) / 1000)) : undefined;
-  btn.title = [
-    st.error ? `Last sync failed: ${st.error}` : `Last sync: ${ago(st.lastSyncAt)}`,
-    st.phase === 'paused' ? 'Paused while the window is unfocused or the graph is hidden.' : st.phase === 'off' ? 'Sync is disabled (jiraGraph.sync.enabled).' : `Mode: ${st.phase === 'cooldown' ? 'active (fast)' : 'idle'}${next !== undefined ? ` · next in ${next}s` : ''}`,
-    'Click to sync now.',
-  ].join('\n');
+  // Details are rendered by the 'live' tip generator (see registerTips).
 }
 setInterval(renderLive, 5000);
 
+function registerTips() {
+  const list = (current: string, items: [string, string, string][]) =>
+    items.map(([v, name, desc]) => `<div class="tip-opt${v === current ? ' on' : ''}"><b>${esc(name)}</b><span>${esc(desc)}</span></div>`).join('');
+  tips.register('strategy', () => `<div class="tip-head"><span>View strategy</span></div>${list(ui.strategy ?? 'hybrid', [
+    ['explicit', 'Explicit', 'Every relation shapes the layout; nothing is packed'],
+    ['hybrid', 'Hybrid', 'All relations explicit; only relation-less tickets and single-link fans are packed'],
+    ['compact', 'Compact', 'Only dependencies shape the layout; other links drawn on top'],
+  ])}`);
+  tips.register('lens', () => `<div class="tip-head"><span>Lens</span><kbd>L</kbd></div>${list(ui.lens ?? 'none', [
+    ['none', 'None', 'Plain graph'],
+    ['progress', 'Progress', 'Work in progress, time in status, what blocks it'],
+    ['completion', 'Completion', 'Recently done, unblocked, ready to close'],
+    ['planning', 'Planning', 'Active sprint, next sprints, backlog, carried over, idle'],
+  ])}`);
+  tips.register('links', () => `<div class="tip-head"><span>Link visibility</span></div>${list(ui.linkVisibility ?? 'auto', [
+    ['auto', 'Auto', `All links; in Compact, only the selected ticket's once there are more than ${AUTO_LINK_LIMIT}`],
+    ['all', 'All', 'Always draw every link'],
+    ['selection', 'Selected only', 'Links appear for the selected or hovered ticket'],
+  ])}`);
+  tips.register('routing', () => `<div class="tip-head"><span>Edge routing</span></div>${list(ui.routing, [
+    ['ORTHOGONAL', 'Orthogonal', 'Right-angle connectors, like a circuit or tech tree'],
+    ['SPLINES', 'Splines', 'Smooth curves'],
+    ['POLYLINE', 'Polyline', 'Straight segments'],
+  ])}`);
+  tips.register('live', () => {
+    const st = syncState;
+    if (!st) return '<div class="tip-head"><span>Live sync</span></div>';
+    const next = st.nextRunAt ? Math.max(0, Math.round((st.nextRunAt - Date.now()) / 1000)) : undefined;
+    const mode =
+      st.phase === 'off' ? 'Disabled (jiraGraph.sync.enabled)'
+      : st.phase === 'paused' ? 'Paused — window unfocused or graph hidden'
+      : st.phase === 'cooldown' ? 'Active — you interacted recently, checking often'
+      : 'Idle — checking about once a minute';
+    return `<div class="tip-head"><span>Live sync</span><kbd>click</kbd></div>
+      <div class="tip-desc">${esc(mode)}<br/>Last sync: ${esc(ago(st.lastSyncAt))}${next !== undefined && st.phase !== 'paused' ? ` · next in ${next}s` : ''}${
+        st.error ? `<br/><span class="tip-bad">${esc(st.error)}</span>` : ''
+      }<br/><span class="tip-muted">Click to sync now</span></div>`;
+  });
+}
+registerTips();
+
 /** Apply an incremental update: redraw in place when the visible structure is unchanged, otherwise relayout when the user is not interacting. */
 function applySync(next: GraphModel, diff: SyncDiff) {
+  for (const k of [...diff.changed, ...diff.removed, ...diff.renamed.map(([o]) => o)]) {
+    descriptions.delete(k);
+    descRequests.delete(k);
+  }
+  if (card.openKey && diff.changed.includes(card.openKey)) requestDescription(card.openKey, true);
+  if (selected && diff.changed.includes(selected) && selected !== card.openKey) requestDescription(selected, true);
   const prevKeys = new Set(visible.issues.map((i) => i.key));
   const prevLinks = new Set(visible.links.map((l) => l.id));
   const prevParents = new Map(visible.issues.map((i) => [i.key, i.parentKey]));
@@ -1692,6 +1911,7 @@ function applySync(next: GraphModel, diff: SyncDiff) {
     renderBanner();
     renderStats();
     flashNodes(flash);
+    card.refresh();
     return;
   }
   // Removed tickets fade out in place before the layout closes the gap.
@@ -1733,6 +1953,14 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
     case 'error':
       showError(m.message);
       break;
+    case 'description':
+      if (descRequests.get(m.key) !== m.reqId) break; // superseded or reset since it was asked for
+      if (m.error !== undefined) descFailedAt.set(m.key, Date.now());
+      else descFailedAt.delete(m.key);
+      descriptions.set(m.key, m.error !== undefined ? { error: m.error } : { html: sanitizeDescription(m.html ?? '') });
+      if (card.openKey === m.key) card.refresh();
+      if (selected === m.key) renderDrawer();
+      break;
     case 'syncState':
       syncState = m;
       renderLive();
@@ -1744,10 +1972,14 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       }
       app.classList.remove('busy');
       overlay.classList.remove('open');
+      resetDescriptions();
       const isNewSource = !model || JSON.stringify(model.source) !== JSON.stringify(m.model.source);
       model = m.model;
       persisted.source = m.model.source;
       styles = new TypeStyles(m.options.typeStyles);
+      card.enabled = m.options.hover?.enabled ?? true;
+      card.delayMs = m.options.hover?.delayMs ?? 1000;
+      descriptionLines = m.options.hover?.descriptionLines ?? 4;
       if (uiFromHost) {
         ui.direction = m.options.direction;
         ui.mode = m.options.hierarchyMode;
@@ -1777,6 +2009,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
 window.addEventListener('resize', () => drawMinimap());
 
 syncToolbar();
+setDrawerWidth(ui.drawerWidth ?? DRAWER_DEFAULT);
 applyView();
 showLoading('Loading…');
 post({ type: 'ready' });

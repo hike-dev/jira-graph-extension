@@ -74,6 +74,7 @@ export interface ViewOptions {
   hierarchyMode: 'edges' | 'nested';
   edgeRouting: 'ORTHOGONAL' | 'SPLINES' | 'POLYLINE';
   typeStyles: Record<string, TypeStyleOverride>;
+  hover?: { enabled: boolean; delayMs: number; descriptionLines: number };
 }
 
 export type HostMessage =
@@ -81,7 +82,8 @@ export type HostMessage =
   | { type: 'syncState'; phase: 'paused' | 'idle' | 'cooldown' | 'off'; lastSyncAt?: number; nextRunAt?: number; syncing?: boolean; error?: string }
   | { type: 'loading'; message: string }
   | { type: 'error'; message: string }
-  | { type: 'focus'; key: string };
+  | { type: 'focus'; key: string }
+  | { type: 'description'; key: string; reqId: number; html?: string; updated?: string; error?: string };
 
 export interface SyncDiff {
   changed: string[];
@@ -93,6 +95,8 @@ export interface SyncDiff {
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'activity' }
+  | { type: 'describe'; key: string; reqId: number }
+  | { type: 'openUrl'; url: string }
   | { type: 'syncNow' }
   | { type: 'openIssue'; key: string }
   | { type: 'expand'; keys: string[] }
