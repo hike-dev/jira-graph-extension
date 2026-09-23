@@ -1,0 +1,223 @@
+import * as vscode from 'vscode';
+import { viewOptions, sessionOptions } from '../config';
+import { JiraError } from '../jira/client';
+import { GraphSession } from '../jira/graphSession';
+import { IssueSource } from '../jira/types';
+import { toMermaid } from '../mermaid';
+import { GraphModel, GraphSource, HostMessage, WebviewMessage } from '../shared/model';
+
+export interface PanelContext {
+  extensionUri: vscode.Uri;
+  /** Resolves the issue source for a graph; undefined when Jira is not configured. */
+  resolveSource(source: GraphSource): Promise<IssueSource | undefined>;
+}
+
+interface PersistedState {
+  source?: GraphSource;
+}
+
+/** One graph = one editor-area webview panel. */
+export class GraphPanel {
+  static readonly viewType = 'jiraGraph.graph';
+
+  private static readonly panels = new Set<GraphPanel>();
+  private static _active: GraphPanel | undefined;
+  private static readonly activeEmitter = new vscode.EventEmitter<GraphPanel | undefined>();
+  private static readonly modelEmitter = new vscode.EventEmitter<GraphPanel>();
+  private static readonly selectEmitter = new vscode.EventEmitter<{ panel: GraphPanel; key: string | undefined }>();
+
+  static readonly onDidChangeActive = GraphPanel.activeEmitter.event;
+  static readonly onDidChangeModel = GraphPanel.modelEmitter.event;
+  static readonly onDidSelect = GraphPanel.selectEmitter.event;
+
+  static get active(): GraphPanel | undefined {
+    return GraphPanel._active;
+  }
+
+  model: GraphModel | undefined;
+  private session: GraphSession | undefined;
+  private abort: AbortController | undefined;
+  private ready = false;
+  private pending: HostMessage[] = [];
+  private readonly disposables: vscode.Disposable[] = [];
+
+  static async open(ctx: PanelContext, source: GraphSource): Promise<GraphPanel | undefined> {
+    const issues = await ctx.resolveSource(source);
+    if (!issues) return undefined;
+    const panel = vscode.window.createWebviewPanel(GraphPanel.viewType, 'Jira Graph', vscode.ViewColumn.Active, {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(ctx.extensionUri, 'dist'), vscode.Uri.joinPath(ctx.extensionUri, 'media')],
+    });
+    const p = new GraphPanel(panel, ctx, source, issues);
+    void p.reload();
+    return p;
+  }
+
+  static async revive(webview: vscode.WebviewPanel, ctx: PanelContext, state: PersistedState | undefined): Promise<void> {
+    const source = state?.source ?? { kind: 'demo' };
+    const issues = await ctx.resolveSource(source);
+    if (!issues) {
+      webview.dispose();
+      return;
+    }
+    const p = new GraphPanel(webview, ctx, source, issues);
+    void p.reload();
+  }
+
+  private constructor(
+    readonly panel: vscode.WebviewPanel,
+    private readonly ctx: PanelContext,
+    readonly source: GraphSource,
+    issues: IssueSource,
+  ) {
+    this.session = new GraphSession(issues, source, sessionOptions());
+    panel.title = this.session.title;
+    panel.iconPath = vscode.Uri.joinPath(ctx.extensionUri, 'media', 'graph-tab.svg');
+    panel.webview.options = { ...panel.webview.options, enableScripts: true };
+    panel.webview.html = this.html(panel.webview);
+
+    GraphPanel.panels.add(this);
+    this.setActive();
+
+    this.disposables.push(
+      panel.onDidDispose(() => this.dispose()),
+      panel.onDidChangeViewState((e) => e.webviewPanel.active && this.setActive()),
+      panel.webview.onDidReceiveMessage((m: WebviewMessage) => this.onMessage(m)),
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout')) {
+          if (this.model) this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'update' });
+        }
+      }),
+    );
+  }
+
+  private setActive() {
+    if (GraphPanel._active === this) return;
+    GraphPanel._active = this;
+    GraphPanel.activeEmitter.fire(this);
+  }
+
+  private dispose() {
+    this.abort?.abort();
+    GraphPanel.panels.delete(this);
+    if (GraphPanel._active === this) {
+      GraphPanel._active = [...GraphPanel.panels].pop();
+      GraphPanel.activeEmitter.fire(GraphPanel._active);
+    }
+    this.disposables.forEach((d) => d.dispose());
+  }
+
+  private post(msg: HostMessage) {
+    if (this.ready) void this.panel.webview.postMessage(msg);
+    else this.pending.push(msg);
+  }
+
+  reveal() {
+    this.panel.reveal();
+  }
+
+  focus(key: string) {
+    this.panel.reveal(undefined, true);
+    this.post({ type: 'focus', key });
+  }
+
+  reload(): Promise<void> {
+    return this.run((progress, signal) => this.session!.load(progress, signal), 'init');
+  }
+
+  expand(keys: string[]): Promise<void> {
+    return this.run((progress, signal) => this.session!.expand(keys, progress, signal), 'update');
+  }
+
+  private async run(job: (progress: (m: string) => void, signal: AbortSignal) => Promise<void>, reason: 'init' | 'update') {
+    this.abort?.abort();
+    const abort = (this.abort = new AbortController());
+    try {
+      await job((message) => this.post({ type: 'loading', message }), abort.signal);
+      if (abort.signal.aborted) return;
+      this.model = this.session!.toModel();
+      this.post({ type: 'graph', model: this.model, options: viewOptions(), reason });
+      GraphPanel.modelEmitter.fire(this);
+    } catch (e) {
+      if (abort.signal.aborted) return;
+      const msg = (e as Error).message;
+      this.post({ type: 'error', message: msg });
+      if (e instanceof JiraError && e.status === 401) {
+        const pick = await vscode.window.showErrorMessage('Jira rejected the credentials.', 'Reconnect');
+        if (pick) void vscode.commands.executeCommand('jiraGraph.configure');
+      }
+    }
+  }
+
+  private async onMessage(m: WebviewMessage) {
+    switch (m.type) {
+      case 'ready':
+        this.ready = true;
+        this.pending.splice(0).forEach((p) => this.post(p));
+        break;
+      case 'openIssue':
+        void vscode.commands.executeCommand('jiraGraph.openInBrowser', m.key);
+        break;
+      case 'expand':
+        await this.expand(m.keys);
+        break;
+      case 'graphFrom': {
+        const demo = this.source.kind === 'demo' || (this.source.kind === 'keys' && !!this.source.demo);
+        await GraphPanel.open(this.ctx, { kind: 'keys', keys: [m.key], demo });
+        break;
+      }
+      case 'refresh':
+        await this.reload();
+        break;
+      case 'select':
+        GraphPanel.selectEmitter.fire({ panel: this, key: m.key });
+        break;
+      case 'copy':
+        await vscode.env.clipboard.writeText(m.text);
+        vscode.window.setStatusBarMessage(`$(copy) Copied ${m.text}`, 2500);
+        break;
+      case 'copyMermaid':
+        this.copyMermaid();
+        break;
+      case 'exportSvg': {
+        const uri = await vscode.window.showSaveDialog({
+          filters: { SVG: ['svg'] },
+          defaultUri: vscode.Uri.file(`${this.panel.title.replace(/[^\w.-]+/g, '_').slice(0, 60)}.svg`),
+        });
+        if (uri) {
+          await vscode.workspace.fs.writeFile(uri, Buffer.from(m.svg, 'utf8'));
+          vscode.window.showInformationMessage(`Graph exported to ${uri.fsPath}`);
+        }
+        break;
+      }
+    }
+  }
+
+  copyMermaid() {
+    if (!this.model) return;
+    void vscode.env.clipboard.writeText(toMermaid(this.model));
+    vscode.window.showInformationMessage('Mermaid diagram copied to clipboard.');
+  }
+
+  private html(webview: vscode.Webview): string {
+    const nonce = [...Array(32)].map(() => Math.floor(Math.random() * 36).toString(36)).join('');
+    const asset = (f: string) => webview.asWebviewUri(vscode.Uri.joinPath(this.ctx.extensionUri, 'dist', f));
+    const state: PersistedState = { source: this.source };
+    return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jira Graph</title>
+</head>
+<body>
+  <div id="app"></div>
+  <script nonce="${nonce}">window.__JIRA_GRAPH_STATE__ = ${JSON.stringify(state)};</script>
+  <script nonce="${nonce}" src="${asset('webview.js')}"></script>
+</body>
+</html>`;
+  }
+}

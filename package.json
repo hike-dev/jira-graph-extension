@@ -1,0 +1,537 @@
+{
+  "name": "jira-graph",
+  "displayName": "Jira Graph",
+  "description": "Visualize Jira tickets as an interactive dependency graph — hierarchy (initiative → epic → story → sub-task) and cross links (blocks, relates, duplicates, clones) laid out with ELK.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "jira",
+    "graph",
+    "dependencies",
+    "elk",
+    "atlassian"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onWebviewPanel:jiraGraph.graph"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "jiraGraph",
+          "title": "Jira Graph",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "jiraGraph": [
+        {
+          "id": "jiraGraph.queries",
+          "name": "Queries",
+          "icon": "media/activity.svg"
+        },
+        {
+          "id": "jiraGraph.issues",
+          "name": "Graph Issues",
+          "icon": "media/activity.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "jiraGraph.queries",
+        "contents": "Visualize Jira tickets, their hierarchy and dependencies as an interactive graph.\n[Connect to Jira](command:jiraGraph.configure)\n[Open Demo Graph](command:jiraGraph.openDemo)",
+        "when": "!jiraGraph.configured"
+      },
+      {
+        "view": "jiraGraph.queries",
+        "contents": "Connected to Jira. Choose the project this workspace works with.\n[Choose Project](command:jiraGraph.selectProject)",
+        "when": "jiraGraph.configured && !jiraGraph.hasProject"
+      },
+      {
+        "view": "jiraGraph.issues",
+        "contents": "No graph is open.\n[Graph for a Project](command:jiraGraph.openProjectGraph)\n[Graph from JQL](command:jiraGraph.openGraph)\n[Graph around Issue](command:jiraGraph.openIssueGraph)\n[Graph for Current Branch](command:jiraGraph.openForBranch)",
+        "when": "!jiraGraph.hasGraph"
+      }
+    ],
+    "commands": [
+      {
+        "command": "jiraGraph.configure",
+        "title": "Connect to Jira",
+        "category": "Jira Graph",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "jiraGraph.signOut",
+        "title": "Sign Out",
+        "category": "Jira Graph"
+      },
+      {
+        "command": "jiraGraph.openProjectGraph",
+        "title": "Open Project Graph",
+        "category": "Jira Graph",
+        "icon": "$(project)"
+      },
+      {
+        "command": "jiraGraph.selectProject",
+        "title": "Switch Project…",
+        "category": "Jira Graph",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "jiraGraph.openGraph",
+        "title": "Open Graph from JQL…",
+        "category": "Jira Graph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "jiraGraph.openIssueGraph",
+        "title": "Open Graph around Issue…",
+        "category": "Jira Graph",
+        "icon": "$(target)"
+      },
+      {
+        "command": "jiraGraph.openForBranch",
+        "title": "Open Graph for Current Git Branch",
+        "category": "Jira Graph",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "jiraGraph.openDemo",
+        "title": "Open Demo Graph",
+        "category": "Jira Graph",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "jiraGraph.refresh",
+        "title": "Reload Graph",
+        "category": "Jira Graph",
+        "icon": "$(refresh)",
+        "enablement": "jiraGraph.hasGraph"
+      },
+      {
+        "command": "jiraGraph.copyMermaid",
+        "title": "Copy Graph as Mermaid",
+        "category": "Jira Graph",
+        "icon": "$(copy)",
+        "enablement": "jiraGraph.hasGraph"
+      },
+      {
+        "command": "jiraGraph.focusGraph",
+        "title": "Show Graph",
+        "category": "Jira Graph"
+      },
+      {
+        "command": "jiraGraph.revealInGraph",
+        "title": "Reveal in Graph",
+        "category": "Jira Graph",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "jiraGraph.openInBrowser",
+        "title": "Open in Jira",
+        "category": "Jira Graph",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "jiraGraph.expandIssue",
+        "title": "Load Relations",
+        "category": "Jira Graph",
+        "icon": "$(add)"
+      },
+      {
+        "command": "jiraGraph.graphFromIssue",
+        "title": "New Graph from Issue",
+        "category": "Jira Graph",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "jiraGraph.copyKey",
+        "title": "Copy Issue Key",
+        "category": "Jira Graph"
+      },
+      {
+        "command": "jiraGraph.runQuery",
+        "title": "Run Query",
+        "category": "Jira Graph",
+        "icon": "$(play)"
+      },
+      {
+        "command": "jiraGraph.addQuery",
+        "title": "Save Query…",
+        "category": "Jira Graph",
+        "icon": "$(add)"
+      },
+      {
+        "command": "jiraGraph.editQuery",
+        "title": "Edit Query…",
+        "category": "Jira Graph",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "jiraGraph.deleteQuery",
+        "title": "Delete Query",
+        "category": "Jira Graph",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "jiraGraph.clearRecent",
+        "title": "Clear Recent Queries",
+        "category": "Jira Graph",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "jiraGraph.openProjectGraph",
+          "when": "view == jiraGraph.queries && jiraGraph.hasProject",
+          "group": "navigation@0"
+        },
+        {
+          "command": "jiraGraph.openGraph",
+          "when": "view == jiraGraph.queries",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jiraGraph.openIssueGraph",
+          "when": "view == jiraGraph.queries",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jiraGraph.addQuery",
+          "when": "view == jiraGraph.queries",
+          "group": "navigation@3"
+        },
+        {
+          "command": "jiraGraph.openForBranch",
+          "when": "view == jiraGraph.queries",
+          "group": "more@1"
+        },
+        {
+          "command": "jiraGraph.openDemo",
+          "when": "view == jiraGraph.queries",
+          "group": "more@2"
+        },
+        {
+          "command": "jiraGraph.configure",
+          "when": "view == jiraGraph.queries",
+          "group": "more@3"
+        },
+        {
+          "command": "jiraGraph.signOut",
+          "when": "view == jiraGraph.queries && jiraGraph.configured",
+          "group": "more@4"
+        },
+        {
+          "command": "jiraGraph.refresh",
+          "when": "view == jiraGraph.issues",
+          "group": "navigation@1"
+        },
+        {
+          "command": "jiraGraph.copyMermaid",
+          "when": "view == jiraGraph.issues",
+          "group": "navigation@2"
+        },
+        {
+          "command": "jiraGraph.selectProject",
+          "when": "view == jiraGraph.queries && jiraGraph.configured",
+          "group": "more@0"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "jiraGraph.selectProject",
+          "when": "view == jiraGraph.queries && viewItem == project",
+          "group": "inline"
+        },
+        {
+          "command": "jiraGraph.runQuery",
+          "when": "view == jiraGraph.queries && viewItem =~ /Query$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "jiraGraph.editQuery",
+          "when": "view == jiraGraph.queries && viewItem == savedQuery",
+          "group": "inline@2"
+        },
+        {
+          "command": "jiraGraph.deleteQuery",
+          "when": "view == jiraGraph.queries && viewItem == savedQuery",
+          "group": "inline@3"
+        },
+        {
+          "command": "jiraGraph.addQuery",
+          "when": "view == jiraGraph.queries && viewItem == recentQuery",
+          "group": "inline@2"
+        },
+        {
+          "command": "jiraGraph.clearRecent",
+          "when": "view == jiraGraph.queries && viewItem == group-recent",
+          "group": "inline"
+        },
+        {
+          "command": "jiraGraph.openInBrowser",
+          "when": "view == jiraGraph.issues && viewItem =~ /^issue/",
+          "group": "inline@1"
+        },
+        {
+          "command": "jiraGraph.expandIssue",
+          "when": "view == jiraGraph.issues && viewItem == issueStub",
+          "group": "inline@0"
+        },
+        {
+          "command": "jiraGraph.revealInGraph",
+          "when": "view == jiraGraph.issues",
+          "group": "1_nav@1"
+        },
+        {
+          "command": "jiraGraph.openInBrowser",
+          "when": "view == jiraGraph.issues",
+          "group": "1_nav@2"
+        },
+        {
+          "command": "jiraGraph.expandIssue",
+          "when": "view == jiraGraph.issues",
+          "group": "2_graph@1"
+        },
+        {
+          "command": "jiraGraph.graphFromIssue",
+          "when": "view == jiraGraph.issues",
+          "group": "2_graph@2"
+        },
+        {
+          "command": "jiraGraph.copyKey",
+          "when": "view == jiraGraph.issues",
+          "group": "3_copy@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "jiraGraph.openIssueGraph",
+          "group": "navigation@99"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "jiraGraph.revealInGraph",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.openInBrowser",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.expandIssue",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.graphFromIssue",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.copyKey",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.runQuery",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.editQuery",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.deleteQuery",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.focusGraph",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Jira Graph",
+      "properties": {
+        "jiraGraph.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Jira base URL, e.g. https://your-company.atlassian.net"
+        },
+        "jiraGraph.deployment": {
+          "type": "string",
+          "enum": [
+            "cloud",
+            "server"
+          ],
+          "enumDescriptions": [
+            "Jira Cloud (email + API token)",
+            "Jira Server / Data Center (personal access token)"
+          ],
+          "default": "cloud"
+        },
+        "jiraGraph.email": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian account email (Cloud only). The token is kept in VS Code Secret Storage."
+        },
+        "jiraGraph.project": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Key of the Jira project this workspace is bound to (e.g. `KBIT`). Graphs and typed JQL are limited to it. Set via **Jira Graph: Switch Project…**."
+        },
+        "jiraGraph.projectName": {
+          "type": "string",
+          "default": "",
+          "description": "Display name of the bound project (set automatically)."
+        },
+        "jiraGraph.expandDepth": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "How many rounds of parents, children and linked issues to follow from the query results."
+        },
+        "jiraGraph.maxIssues": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 10,
+          "maximum": 2000,
+          "description": "Upper bound of issues fetched per graph."
+        },
+        "jiraGraph.includeChildren": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fetch children (stories of epics, sub-tasks) while expanding."
+        },
+        "jiraGraph.epicLinkField": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Server/DC or legacy projects: field id of **Epic Link** (e.g. `customfield_10014`). Leave empty when the `parent` field is used."
+        },
+        "jiraGraph.storyPointsField": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional field id for story points (e.g. `customfield_10016`)."
+        },
+        "jiraGraph.layout.direction": {
+          "type": "string",
+          "enum": [
+            "DOWN",
+            "RIGHT"
+          ],
+          "default": "DOWN",
+          "description": "Default layout direction for new graphs."
+        },
+        "jiraGraph.layout.hierarchyMode": {
+          "type": "string",
+          "enum": [
+            "edges",
+            "nested"
+          ],
+          "enumDescriptions": [
+            "Parent → child edges",
+            "Children nested inside parent containers"
+          ],
+          "default": "edges"
+        },
+        "jiraGraph.layout.edgeRouting": {
+          "type": "string",
+          "enum": [
+            "ORTHOGONAL",
+            "SPLINES",
+            "POLYLINE"
+          ],
+          "default": "ORTHOGONAL"
+        },
+        "jiraGraph.issueTypeStyles": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Per issue type overrides, keyed by type name. Example: `{ \"Tech Debt\": { \"base\": \"task\", \"color\": \"#8B5CF6\", \"border\": \"dashed\", \"icon\": \"improvement\" } }`. Icons: epic, story, task, bug, subtask, initiative, feature, spike, improvement, incident, other.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "base": {
+                "type": "string",
+                "enum": [
+                  "initiative",
+                  "epic",
+                  "feature",
+                  "story",
+                  "task",
+                  "bug",
+                  "incident",
+                  "spike",
+                  "improvement",
+                  "subtask",
+                  "other"
+                ]
+              },
+              "color": {
+                "type": "string"
+              },
+              "border": {
+                "type": "string",
+                "enum": [
+                  "solid",
+                  "dashed",
+                  "dotted",
+                  "double"
+                ]
+              },
+              "icon": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "jiraGraph.queries": {
+          "type": "array",
+          "default": [],
+          "description": "Saved JQL queries (commit them in workspace settings to share with the team).",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "jql"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "jql": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "esbuild test/graph.test.ts --bundle --platform=node --format=esm --outfile=dist-test/graph.test.mjs --log-level=warning && node --test dist-test/graph.test.mjs",
+    "package": "npm run typecheck && node esbuild.mjs --production && npx @vscode/vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "1.90.0",
+    "elkjs": "^0.12.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
