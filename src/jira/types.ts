@@ -38,4 +38,10 @@ export interface RawIssue {
 export interface IssueSource {
   readonly baseUrl: string;
   search(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]>;
+  /**
+   * Which of the given numeric issue ids still exist and are visible to the user.
+   * Returns id → current key (a different key means the issue was moved to another project).
+   * Optional: without it the session falls back to `id in (...)` searches.
+   */
+  presence?(ids: string[], signal?: AbortSignal): Promise<Map<string, string>>;
 }

@@ -1,6 +1,7 @@
-import type { GraphIssue, GraphLink, GraphModel, GraphSource, HostMessage, LinkCategory, ViewOptions, WebviewMessage } from '../src/shared/model';
+import type { GraphIssue, GraphLink, GraphModel, GraphSource, HostMessage, LinkCategory, SyncDiff, ViewOptions, WebviewMessage } from '../src/shared/model';
 import { UI_ICONS } from './icons';
-import { GROUP_HEADER, layout, LayoutEdge, LayoutNode, LayoutResult, Point } from './layout';
+import { GROUP_HEADER, layout, LayoutEdge, LayoutNode, LayoutResult, LayoutStrategy, Point } from './layout';
+import { computeLens, fmtAge, hasSprintData, LensId, LensMark, LENSES } from './lens';
 import { dashArray, ICONS, iconMarkup, LINK_LABELS, PRIORITY, TypeStyle, TypeStyles } from './typeStyles';
 import cssText from './styles.css';
 
@@ -30,6 +31,10 @@ interface UiState {
   hiddenLinks: string[];
   legendOpen: boolean;
   minimap: boolean;
+  /** Cross links: always, only for the selected/hovered ticket, or automatically when there are many. */
+  linkVisibility?: 'all' | 'selection' | 'auto';
+  lens?: LensId;
+  strategy?: LayoutStrategy;
 }
 interface Persisted {
   source?: GraphSource;
@@ -74,6 +79,20 @@ let matchIdx = -1;
 let blocked = new Set<string>();
 let cycleEdges = new Set<string>();
 let cycles: string[][] = [];
+/** Status counts of all descendants, for the progress bar on parents. */
+let rollups = new Map<string, { new: number; indeterminate: number; done: number }>();
+const AUTO_LINK_LIMIT = 40;
+let linksFocused = false;
+let lensMarks = new Map<string, LensMark>();
+const LENS_ORDER: LensId[] = ['none', 'progress', 'completion', 'planning'];
+
+function recomputeLens() {
+  const id = ui.lens ?? 'none';
+  lensMarks = model ? computeLens(id, { issues: model.issues, links: model.links, byKey, rollups }) : new Map();
+  svg.classList.toggle('lens', id !== 'none');
+  app.dataset.lens = id;
+  LENS_ORDER.forEach((l) => svg.classList.toggle(`lens-${l}`, l === id));
+}
 const view = { x: 0, y: 0, k: 1 };
 let layoutToken = 0;
 let firstLayout = true;
@@ -87,6 +106,7 @@ const app = document.getElementById('app')!;
 app.innerHTML = `
 <header class="toolbar">
   <div class="title"><span class="title-text">Jira Graph</span><span class="stats"></span></div>
+  <button class="live" data-action="syncNow" title="Live sync"><span class="dot"></span><span class="live-text">live</span></button>
   <div class="spacer"></div>
   <label class="search"><input type="search" placeholder="Search key, title, assignee, label…" spellcheck="false" /><span class="count"></span></label>
   <div class="seg" data-opt="mode">
@@ -97,6 +117,22 @@ app.innerHTML = `
     <button data-v="DOWN" title="Top → bottom">${UI_ICONS.down}</button>
     <button data-v="RIGHT" title="Left → right">${UI_ICONS.right}</button>
   </div>
+  <select data-opt="strategy" title="Layout strategy">
+    <option value="explicit">View: explicit</option>
+    <option value="hybrid">View: hybrid</option>
+    <option value="compact">View: compact</option>
+  </select>
+  <select data-opt="lens" title="Lens: highlight what matters for a question (L cycles)">
+    <option value="none">Lens: none</option>
+    <option value="progress">Lens: progress</option>
+    <option value="completion">Lens: completion</option>
+    <option value="planning">Lens: planning</option>
+  </select>
+  <select data-opt="linkVisibility" title="Which cross links are drawn">
+    <option value="auto">Links: auto</option>
+    <option value="all">Links: all</option>
+    <option value="selection">Links: selected only</option>
+  </select>
   <select data-opt="routing" title="Edge routing">
     <option value="ORTHOGONAL">Orthogonal</option>
     <option value="SPLINES">Splines</option>
@@ -157,7 +193,7 @@ const toastEl = $<HTMLElement>('.toast');
 const minimap = $<HTMLCanvasElement>('.minimap');
 const searchInput = $<HTMLInputElement>('.search input');
 
-function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number | undefined> = {}, parent?: Element): SVGElementTagNameMap[K] {
+function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number | undefined> = {}, parent?: Element | null): SVGElementTagNameMap[K] {
   const e = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) if (v !== undefined) e.setAttribute(k, String(v));
   parent?.appendChild(e);
@@ -208,6 +244,24 @@ function indexModel(m: GraphModel) {
     if (l.category === 'blocks' && a && b && a.statusCategory !== 'done' && b.statusCategory !== 'done') blocked.add(l.to);
   }
   ({ cycles, cycleEdges } = findCycles(m.links.filter((l) => l.category === 'blocks')));
+  rollups = new Map();
+  const roll = (k: string, seen: Set<string>): { new: number; indeterminate: number; done: number } => {
+    const cached = rollups.get(k);
+    if (cached) return cached;
+    const r = { new: 0, indeterminate: 0, done: 0 };
+    for (const c of childrenOf.get(k) ?? []) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      r[byKey.get(c)!.statusCategory]++;
+      const sub = roll(c, seen);
+      r.new += sub.new;
+      r.indeterminate += sub.indeterminate;
+      r.done += sub.done;
+    }
+    rollups.set(k, r);
+    return r;
+  };
+  for (const k of childrenOf.keys()) roll(k, new Set([k]));
 }
 
 /** Tarjan SCC over "blocks" links; any SCC with more than one issue is a dependency cycle. */
@@ -328,6 +382,7 @@ async function relayout(opts: { fit?: boolean } = {}) {
       showHierarchy: ui.showHierarchy,
       showLabels: ui.showLabels,
       linksAffectLayout: ui.linksAffectLayout,
+      strategy: ui.strategy ?? 'hybrid',
     });
   } catch (e) {
     showError(`Layout failed: ${(e as Error).message ?? e}`);
@@ -376,7 +431,23 @@ function render() {
 
   layers.edges.replaceChildren();
   layers.labels.replaceChildren();
+  layers.groups.querySelectorAll('.g-frame').forEach((f) => f.remove());
+  for (const f of lay.frames) {
+    const parent = byKey.get(f.parent);
+    const fg = el('g', { class: 'g-frame', 'data-parent': f.parent });
+    layers.groups.insertBefore(fg, layers.groups.firstChild);
+    if (parent) fg.style.setProperty('--type', styleOf(parent).color);
+    el('rect', { x: f.x, y: f.y, width: f.w, height: f.h, rx: 12 }, fg);
+    if (f.label) el('text', { class: 'g-frame-label', x: f.x + 14, y: f.y + 21 }, fg).textContent = f.label;
+    el('title', {}, fg).textContent = f.id ? `${f.label} — bundled into one edge` : f.parent ? `Children of ${f.parent} without other relations` : 'Tickets without a parent or layout relations';
+    if (f.id) fg.classList.add('fan');
+  }
   for (const e of lay.edges) drawEdge(e);
+  const crossLinks = lay.edges.filter((e) => e.kind !== 'hierarchy').length;
+  const mode = ui.linkVisibility ?? 'auto';
+  // Auto hides links only in the compact strategy; explicit and hybrid exist to show relations.
+  linksFocused = mode === 'selection' || (mode === 'auto' && (ui.strategy ?? 'hybrid') === 'compact' && crossLinks > AUTO_LINK_LIMIT);
+  svg.classList.toggle('links-focus', linksFocused);
   applyClasses();
 }
 
@@ -392,6 +463,8 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
     `s-${i.statusCategory}`,
     i.loaded ? '' : 'stub',
     blocked.has(i.key) ? 'blocked' : '',
+    lensMarks.get(i.key) ? `lens-${lensMarks.get(i.key)!.level}` : '',
+    lensMarks.get(i.key)?.outline ? `lens-${lensMarks.get(i.key)!.outline}` : '',
   ].filter(Boolean).join(' '));
   g.style.setProperty('--type', s.color);
 
@@ -399,6 +472,8 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
   title.textContent = `${i.key} · ${i.type} · ${i.status}\n${i.summary}${i.assignee ? `\n👤 ${i.assignee}` : ''}${i.loaded ? '' : '\n(not loaded — double-click to expand)'}`;
 
   el('rect', { class: 'g-select', x: -5, y: -5, width: w + 10, height: n.h + 10, rx: s.radius + 5 }, g);
+  const lensMark = lensMarks.get(i.key);
+  if (lensMark?.level === 'primary') el('rect', { class: 'g-lens-ring', x: -3.5, y: -3.5, width: w + 7, height: (n.group ? h : n.h) + 7, rx: s.radius + 3.5 }, g);
   const dash = dashArray(s);
   if (n.group) {
     el('rect', { class: 'g-group-bg', width: w, height: n.h, rx: s.radius }, g);
@@ -407,24 +482,37 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
   } else {
     el('rect', { class: 'g-card', width: w, height: h, rx: s.radius }, g);
   }
+  // Status stripe along the left edge: status is readable at a glance, independent of the type border.
+  el('rect', { class: 'g-stripe', x: 4, y: 9, width: 3.5, height: h - 18, rx: 1.75 }, g);
   el('rect', { class: 'g-border', width: w, height: n.h, rx: s.radius, 'stroke-width': s.width, 'stroke-dasharray': dash }, g);
   if (s.border === 'double') {
     el('rect', { class: 'g-border', x: 3.5, y: 3.5, width: w - 7, height: n.h - 7, rx: Math.max(0, s.radius - 3), 'stroke-width': s.width }, g);
   }
 
+  // Zoomed-out tile: a status-coloured block with a key that stays readable (see applyView / --inv).
+  const tile = el('foreignObject', { class: 'g-tile', x: 0, y: 0, width: w, height: h }, g);
+  const tdiv = document.createElementNS(XHTML, 'div') as HTMLDivElement;
+  tdiv.className = `tile st-${i.statusCategory}`;
+  const maxFs = n.group ? h * 0.5 : Math.min(h * 0.46, (w - 20) / (i.key.length * 0.6));
+  tdiv.style.setProperty('--maxfs', `${maxFs.toFixed(1)}px`);
+  tdiv.textContent = n.group && i.summary ? `${i.key} · ${i.summary}` : i.key;
+  tile.appendChild(tdiv);
+
+  const det = el('g', { class: 'g-detail' }, g);
+
   // Header row: [icon] KEY [priority]            [avatar] [STATUS]
-  const iconG = el('g', { class: 'g-icon', transform: 'translate(12 11) scale(1.25)' }, g);
+  const iconG = el('g', { class: 'g-icon', transform: 'translate(12 11) scale(1.25)' }, det);
   iconG.style.color = s.color;
   el('rect', { width: 16, height: 16, rx: 3.5, fill: s.color }, iconG);
   iconG.insertAdjacentHTML('beforeend', ICONS[s.icon]);
 
-  const key = el('text', { class: 'g-key', x: 40, y: 26 }, g);
+  const key = el('text', { class: 'g-key', x: 40, y: 26 }, det);
   key.textContent = i.key;
   let cursor = 40 + measure(i.key, `600 12.5px ${fontFamily}`) + 6;
 
   const pr = i.priority ? PRIORITY[i.priority.toLowerCase()] : undefined;
   if (pr) {
-    const p = el('path', { class: 'g-priority', d: pr.path, transform: `translate(${cursor} 15)`, stroke: pr.color }, g);
+    const p = el('path', { class: 'g-priority', d: pr.path, transform: `translate(${cursor} 15)`, stroke: pr.color }, det);
     el('title', {}, p).textContent = `Priority: ${i.priority}`;
     cursor += 16;
   }
@@ -433,13 +521,13 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
   if (i.status) {
     const text = i.status.length > 16 ? `${i.status.slice(0, 15)}…` : i.status;
     const tw = measure(text.toUpperCase(), `700 10px ${fontFamily}`) + 14;
-    const pill = el('g', { class: `g-status st-${i.statusCategory}`, transform: `translate(${right - tw} 11)` }, g);
+    const pill = el('g', { class: `g-status st-${i.statusCategory}`, transform: `translate(${right - tw} 11)` }, det);
     el('rect', { width: tw, height: 18, rx: 4 }, pill);
     el('text', { x: tw / 2, y: 12.5 }, pill).textContent = text.toUpperCase();
     right -= tw + 6;
   }
   if (i.assignee && right - 20 > cursor) {
-    const av = el('g', { class: 'g-avatar', transform: `translate(${right - 10} 20)` }, g);
+    const av = el('g', { class: 'g-avatar', transform: `translate(${right - 10} 20)` }, det);
     el('circle', { r: 10, fill: avatarColor(i.assignee) }, av);
     el('text', { y: 3.6 }, av).textContent = initials(i.assignee);
     el('title', {}, av).textContent = i.assignee;
@@ -447,11 +535,45 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
 
   // Summary (HTML for wrapping + ellipsis)
   const lines = n.group || s.size === 'small' ? 1 : 2;
-  const fo = el('foreignObject', { x: 12, y: 36, width: w - 24, height: lines * 17 + 2 }, g);
+  const fo = el('foreignObject', { x: 12, y: 36, width: w - 24, height: lines * 17 + 2 }, det);
   const div = document.createElementNS(XHTML, 'div') as HTMLDivElement;
   div.className = `g-summary lines-${lines}${i.summary ? '' : ' empty'}`;
   div.textContent = i.summary || 'Not loaded — double-click to expand';
   fo.appendChild(div);
+
+  // Lens badges straddle the bottom-left border.
+  let badgesEnd = 0;
+  if (lensMark?.badges.length) {
+    let bx = 10;
+    const by = (n.group ? h : n.h) - 8;
+    for (const b of lensMark.badges) {
+      const bw = measure(b.text, `600 10px ${fontFamily}`) + 12;
+      const bg = el('g', { class: `g-lbadge tone-${b.tone}`, transform: `translate(${bx} ${by})` }, g);
+      el('rect', { width: bw, height: 16, rx: 8 }, bg);
+      el('text', { x: bw / 2, y: 11.5 }, bg).textContent = b.text;
+      el('title', {}, bg).textContent = b.title;
+      bx += bw + 4;
+    }
+    badgesEnd = bx;
+  }
+
+  // Progress of all descendants: done | in progress | to do.
+  const r = rollups.get(i.key);
+  const total = r ? r.new + r.indeterminate + r.done : 0;
+  if (r && total) {
+    const bx = Math.max(12, badgesEnd + 2);
+    const bw = Math.max(20, w - bx - 12 - (n.group ? 60 : 0));
+    const by = n.group ? h - 1.5 : n.h - 6;
+    const bar = el('g', { class: 'g-rollup', transform: `translate(${bx} ${by})` }, g);
+    el('rect', { class: 'track', width: bw, height: 3, rx: 1.5 }, bar);
+    let x = 0;
+    for (const cat of ['done', 'indeterminate'] as const) {
+      const segW = (r[cat] / total) * bw;
+      if (segW > 0) el('rect', { class: `seg st-${cat}`, x, width: segW, height: 3, rx: 1.5 }, bar);
+      x += segW;
+    }
+    el('title', {}, bar).textContent = `${r.done}/${total} done · ${r.indeterminate} in progress · ${r.new} to do`;
+  }
 
   // Badges
   if (blocked.has(i.key)) {
@@ -465,7 +587,7 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
     const isCollapsed = collapsed.has(i.key);
     const label = isCollapsed ? `▸ ${kids}` : `▾ ${kids}`;
     const tw = measure(label, `600 10.5px ${fontFamily}`) + 14;
-    const [tx, ty] = n.group ? [w - tw - 12, GROUP_HEADER - 11] : ui.direction === 'DOWN' ? [w / 2 - tw / 2, n.h - 9] : [w - tw / 2 - 9, n.h / 2 - 9];
+    const [tx, ty] = n.group ? [w - tw - 12, GROUP_HEADER - 9] : ui.direction === 'DOWN' ? [w - tw - 10, n.h - 9] : [w - tw / 2 - 9, n.h / 2 - 9];
     const t = el('g', { class: `g-toggle${isCollapsed ? ' collapsed' : ''}`, transform: `translate(${tx} ${ty})` }, g);
     el('rect', { width: tw, height: 18, rx: 9 }, t);
     el('text', { x: tw / 2, y: 12.6 }, t).textContent = label;
@@ -484,7 +606,8 @@ function drawEdge(e: LayoutEdge) {
   const g = el('g', { class: `g-edge k-${e.kind}${cycleEdges.has(e.id) ? ' cycle' : ''}${e.id.startsWith('l:agg:') ? ' agg' : ''}`, 'data-from': e.from, 'data-to': e.to }, layers.edges);
   el('path', { class: 'hit', d }, g);
   el('path', { class: 'line', d, 'marker-end': e.kind === 'relates' ? undefined : `url(#m-${e.kind})` }, g);
-  el('title', {}, g).textContent = e.kind === 'hierarchy' ? `${e.from} is parent of ${e.to}` : `${e.from} ${e.label} ${e.to}`;
+  const nm = (k: string) => (k.startsWith('__fan:') ? `${lay?.frames.find((f) => f.id === k)?.members?.length ?? ''} tickets` : k);
+  el('title', {}, g).textContent = e.kind !== 'hierarchy' ? `${nm(e.from)} ${e.label} ${nm(e.to)}` : e.to.startsWith('__grid:') ? `${e.from} → its packed children` : `${e.from} is parent of ${e.to}`;
   if (e.labelPos && e.label) {
     const lw = measure(e.label) + 10;
     const lg = el('g', { class: `g-elabel k-${e.kind}`, transform: `translate(${e.labelPos.x} ${e.labelPos.y})`, 'data-from': e.from, 'data-to': e.to }, layers.labels);
@@ -542,30 +665,78 @@ function initials(name: string): string {
 // ── Highlight / selection classes ───────────────────────────────────────────
 let hovered: string | undefined;
 
+/**
+ * Tech-tree style chains over "blocks" links: everything the ticket transitively needs (prerequisites)
+ * and everything it transitively unlocks. Depth = number of steps away.
+ */
+function chainOf(key: string, links: GraphLink[] = visible.links): { up: Map<string, number>; down: Map<string, number> } {
+  const walk = (dir: 'up' | 'down') => {
+    const out = new Map<string, number>();
+    let frontier = [key];
+    for (let depth = 1; frontier.length && depth < 50; depth++) {
+      const next: string[] = [];
+      for (const k of frontier) {
+        for (const l of links) {
+          if (l.category !== 'blocks') continue;
+          const other = dir === 'up' ? (l.to === k ? l.from : undefined) : l.from === k ? l.to : undefined;
+          if (other && other !== key && !out.has(other)) out.set(other, depth), next.push(other);
+        }
+      }
+      frontier = next;
+    }
+    return out;
+  };
+  return { up: walk('up'), down: walk('down') };
+}
+
 function applyClasses() {
   const related = new Set<string>();
   const focusKey = hovered ?? selected;
+  const chain = focusKey ? chainOf(focusKey) : { up: new Map<string, number>(), down: new Map<string, number>() };
+  // Fan clusters: their bundled edge ends at a synthetic id standing for all members.
+  const fanMembers = new Map<string, string[]>();
+  const fanOf = new Map<string, string>();
+  for (const f of lay?.frames ?? []) {
+    if (!f.id || !f.members) continue;
+    fanMembers.set(f.id, f.members);
+    f.members.forEach((m) => fanOf.set(m, f.id!));
+  }
+  const inSet = (set: Map<string, number>, id: string) => set.has(id) || !!fanMembers.get(id)?.some((m) => set.has(m));
+  const isFocus = (id: string) => id === focusKey || fanOf.get(focusKey ?? '') === id;
   if (focusKey) {
     related.add(focusKey);
+    for (const k of [...chain.up.keys(), ...chain.down.keys()]) related.add(k);
     layers.edges.querySelectorAll<SVGGElement>('.g-edge').forEach((e) => {
-      const hit = e.dataset.from === focusKey || e.dataset.to === focusKey;
+      const parent = byKey.get(focusKey)?.parentKey;
+      const toGrid = !!parent && e.dataset.to === `__grid:${parent}`;
+      const f = e.dataset.from!;
+      const t = e.dataset.to!;
+      const inChain =
+        e.classList.contains('k-blocks') &&
+        ((inSet(chain.up, f) && (isFocus(t) || inSet(chain.up, t))) || ((isFocus(f) || inSet(chain.down, f)) && inSet(chain.down, t)));
+      const hit = isFocus(f) || isFocus(t) || toGrid || inChain;
       e.classList.toggle('hl', hit);
+      e.classList.toggle('chain', inChain);
+      if (hit) for (const id of [f, t]) fanMembers.get(id)?.forEach((m) => related.add(m));
       if (hit) related.add(e.dataset.from!), related.add(e.dataset.to!);
     });
     layers.labels.querySelectorAll<SVGGElement>('.g-elabel').forEach((e) =>
-      e.classList.toggle('hl', e.dataset.from === focusKey || e.dataset.to === focusKey),
+      e.classList.toggle('hl', isFocus(e.dataset.from!) || isFocus(e.dataset.to!)),
     );
   } else {
-    layers.edges.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl'));
+    layers.edges.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl', 'chain'));
     layers.labels.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl'));
   }
   const spot = highlight ?? (searchText ? new Set(matches) : undefined);
   for (const [k, g] of nodeEls) {
     g.classList.toggle('selected', k === selected);
     g.classList.toggle('hl', related.has(k));
+    g.classList.toggle('chain-up', chain.up.has(k));
+    g.classList.toggle('chain-down', chain.down.has(k));
     g.classList.toggle('match', !!spot?.has(k));
   }
-  svg.classList.toggle('hovering', !!hovered);
+  // Selection keeps the hover-style neighbourhood highlight until it is cleared.
+  svg.classList.toggle('hovering', !!focusKey);
   svg.classList.toggle('spotlight', !!spot);
 }
 
@@ -581,7 +752,9 @@ function select(key: string | undefined, opts: { center?: boolean; notify?: bool
 function applyView() {
   viewport.setAttribute('transform', `translate(${view.x} ${view.y}) scale(${view.k})`);
   $<HTMLButtonElement>('.zoom-level').textContent = `${Math.round(view.k * 100)}%`;
-  svg.classList.toggle('far', view.k < 0.45);
+  const far = view.k < 0.45;
+  svg.classList.toggle('far', far);
+  if (far) svg.style.setProperty('--inv', (1 / view.k).toFixed(3));
   drawMinimap();
 }
 
@@ -644,47 +817,62 @@ function zoomAt(factor: number, cx?: number, cy?: number) {
 
 // ── Pointer interaction ─────────────────────────────────────────────────────
 let pan: { x: number; y: number; vx: number; vy: number; moved: boolean } | undefined;
+/** Set when a drag ends so the click that follows it does not select or toggle anything. */
+let suppressClick = false;
 const keyAt = (t: EventTarget | null) => (t as Element | null)?.closest?.<SVGGElement>('.g-node')?.dataset.key;
 
+// Dragging pans from anywhere, including on top of tickets. A press without movement stays a click.
 svg.addEventListener('pointerdown', (e) => {
   hideMenu();
-  if (e.button !== 0 || keyAt(e.target)) return;
+  if (e.button !== 0) return;
   pan = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
-  svg.setPointerCapture(e.pointerId);
-  svg.classList.add('panning');
 });
 svg.addEventListener('pointermove', (e) => {
   if (!pan) return;
   const dx = e.clientX - pan.x;
   const dy = e.clientY - pan.y;
-  if (Math.abs(dx) + Math.abs(dy) > 3) pan.moved = true;
+  if (!pan.moved) {
+    if (Math.abs(dx) + Math.abs(dy) <= 4) return;
+    // Capture only once it is a drag: capturing on press would retarget the click away from the ticket.
+    pan.moved = true;
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add('panning');
+  }
   view.x = pan.vx + dx;
   view.y = pan.vy + dy;
   anim++;
   applyView();
 });
-svg.addEventListener('pointerup', (e) => {
-  if (pan && !pan.moved && !keyAt(e.target)) {
+const endPan = (e: PointerEvent) => {
+  if (pan?.moved) {
+    suppressClick = true;
+    setTimeout(() => (suppressClick = false), 0);
+  } else if (pan && e.type === 'pointerup' && !keyAt(e.target)) {
     highlight = undefined;
     select(undefined);
   }
   pan = undefined;
   svg.classList.remove('panning');
-});
+};
+svg.addEventListener('pointerup', endPan);
+svg.addEventListener('pointercancel', endPan);
 svg.addEventListener('wheel', (e) => {
   e.preventDefault();
   anim++;
-  if (e.ctrlKey || e.metaKey || e.deltaMode === 1) {
-    const r = svg.getBoundingClientRect();
-    zoomAt(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0035)), e.clientX - r.left, e.clientY - r.top);
-  } else {
-    view.x -= e.deltaX;
-    view.y -= e.deltaY;
+  // Scroll (and pinch) zooms around the cursor; Shift+scroll pans.
+  if (e.shiftKey) {
+    view.x -= e.deltaX || e.deltaY;
+    view.y -= e.deltaX ? e.deltaY : 0;
     applyView();
+    return;
   }
+  const r = svg.getBoundingClientRect();
+  const step = e.deltaMode === 1 ? 0.05 : e.ctrlKey ? 0.01 : 0.0022;
+  zoomAt(Math.exp(-e.deltaY * step), e.clientX - r.left, e.clientY - r.top);
 }, { passive: false });
 
 svg.addEventListener('click', (e) => {
+  if (suppressClick) return;
   const key = keyAt(e.target);
   if (!key) return;
   const t = e.target as Element;
@@ -789,6 +977,18 @@ function setFocus(key: string | undefined, hops = 2) {
 }
 
 // ── Drawer (details) ────────────────────────────────────────────────────────
+function chainSummary(key: string): string {
+  if (!model) return '';
+  const { up, down } = chainOf(key, model.links);
+  if (!up.size && !down.size) return '';
+  const openUp = [...up.keys()].filter((k) => byKey.get(k)?.statusCategory !== 'done');
+  const depth = Math.max(0, ...[...up.values()]);
+  return `<div class="d-chain">
+    <span class="chain-up-chip" title="Transitive blockers (prerequisites)">⬆ requires ${up.size}${openUp.length !== up.size ? ` · ${openUp.length} open` : ''}${depth > 1 ? ` · ${depth} steps deep` : ''}</span>
+    <span class="chain-down-chip" title="Everything this transitively unblocks">⬇ unlocks ${down.size}</span>
+  </div>`;
+}
+
 function renderDrawer() {
   const i = selected ? byKey.get(selected) : undefined;
   stage.classList.toggle('drawer-open', !!i);
@@ -822,10 +1022,17 @@ function renderDrawer() {
       <button class="icon d-close" title="Close (Esc)">${UI_ICONS.close}</button>
     </div>
     <h3 class="d-summary">${esc(i.summary || '(not loaded)')}</h3>
+    ${chainSummary(i.key)}
     ${blocked.has(i.key) ? `<div class="d-alert">${UI_ICONS.warn}<span>Blocked by an unresolved issue</span></div>` : ''}
     <dl class="d-grid">
       <dt>Status</dt><dd><span class="pill st-${i.statusCategory}">${esc(i.status || '—')}</span></dd>
+      ${lensMarks.get(i.key)?.badges.length ? `<dt>${esc(LENSES[ui.lens ?? 'none'].label)}</dt><dd>${lensMarks.get(i.key)!.badges.map((b) => `<span class="lbadge tone-${b.tone}" title="${esc(b.title)}">${esc(b.text)}</span> <small>${esc(b.title)}</small>`).join('<br/>')}</dd>` : ''}
       <dt>Priority</dt><dd>${esc(i.priority ?? '—')}</dd>
+      ${i.statusChangedAt ? `<dt>In status</dt><dd>${fmtAge((Date.now() - Date.parse(i.statusChangedAt)) / 86_400_000)} (since ${new Date(i.statusChangedAt).toLocaleDateString()})</dd>` : ''}
+      ${i.resolvedAt ? `<dt>Resolved</dt><dd>${new Date(i.resolvedAt).toLocaleDateString()}</dd>` : ''}
+      ${i.sprints?.length ? `<dt>Sprints</dt><dd>${i.sprints.map((sp) => `<span class="tag sprint-${sp.state}" title="${sp.state}">${esc(sp.name)}</span>`).join(' ')}</dd>` : ''}
+      ${i.dueDate ? `<dt>Due</dt><dd>${new Date(i.dueDate).toLocaleDateString()}</dd>` : ''}
+      ${i.fixVersions?.length ? `<dt>Fix version</dt><dd>${i.fixVersions.map((v) => `<span class="tag">${esc(v)}</span>`).join(' ')}</dd>` : ''}
       <dt>Assignee</dt><dd>${i.assignee ? `<span class="avatar" style="background:${avatarColor(i.assignee)}">${initials(i.assignee)}</span>${esc(i.assignee)}` : '<i>Unassigned</i>'}</dd>
       ${i.storyPoints !== undefined ? `<dt>Points</dt><dd>${i.storyPoints}</dd>` : ''}
       ${i.labels.length ? `<dt>Labels</dt><dd>${i.labels.map((l) => `<span class="tag">${esc(l)}</span>`).join(' ')}</dd>` : ''}
@@ -905,6 +1112,27 @@ function revealKey(key: string) {
 }
 
 // ── Legend ──────────────────────────────────────────────────────────────────
+function lensLegend(): string {
+  const id = ui.lens ?? 'none';
+  if (id === 'none') return '';
+  const info = LENSES[id];
+  const counts = { primary: 0, context: 0, muted: 0 };
+  for (const i of visible.issues) {
+    const m = lensMarks.get(i.key);
+    if (m) counts[m.level]++;
+  }
+  const row = (r: (typeof info.legend)[number]) => {
+    const sample = r.badge
+      ? `<span class="lbadge tone-${r.badge.tone}">${esc(r.badge.text)}</span>`
+      : r.outline
+        ? `<span class="lsample outline-${r.outline}"></span>`
+        : `<span class="lsample level-${r.level}"></span>`;
+    const n = r.level && !r.badge && !r.outline ? `<em>${counts[r.level]}</em>` : '';
+    return `<div class="lrow">${sample}<span>${esc(r.text)}</span>${n}</div>`;
+  };
+  return `<h5>Lens · ${esc(info.label)}</h5><p class="lens-hint">${esc(info.hint)}</p>${info.legend.map(row).join('')}`;
+}
+
 function renderLegend() {
   if (!model) return;
   const types = new Map<string, { style: TypeStyle; count: number }>();
@@ -948,12 +1176,13 @@ function renderLegend() {
   legend.innerHTML = `
     <button class="legend-head">Legend <span>${ui.legendOpen ? '▾' : '▸'}</span></button>
     <div class="legend-body">
+      ${lensLegend()}
       <h5>Issue types</h5>${typeRows}
       ${rows.length ? `<h5>Relations</h5>${rows.join('')}` : ''}
       <h5>Status</h5>
       <div class="statuses"><span class="pill st-new">To do</span><span class="pill st-indeterminate">In progress</span><span class="pill st-done">Done</span></div>
       <div class="badges"><span class="badge-blocked"></span> blocked <span class="badge-stub"></span> not loaded</div>
-      <p class="help">Drag / scroll to pan · ${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+scroll or pinch to zoom · double-click opens · right-click for actions · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
+      <p class="help">Scroll / pinch to zoom · drag anywhere or Shift+scroll to pan · <kbd>L</kbd> lens · double-click opens · right-click for actions · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
     </div>`;
   legend.querySelector('.legend-head')!.addEventListener('click', () => {
     ui.legendOpen = !ui.legendOpen;
@@ -987,7 +1216,14 @@ function renderLegend() {
 function renderBanner() {
   if (!model) return;
   const parts: string[] = [];
+  if (ui.lens === 'planning' && !hasSprintData(model.issues)) {
+    parts.push(`<span class="warn">${UI_ICONS.warn} No sprint data on these tickets — check the <b>jiraGraph.sprintField</b> setting (Cloud default customfield_10020)</span>`);
+  }
   if (model.truncated) parts.push(`<span class="warn">${UI_ICONS.warn} Truncated at ${model.issues.filter((i) => i.loaded).length} loaded issues (jiraGraph.maxIssues)</span>`);
+  if (linksFocused && lay) {
+    const n = lay.edges.filter((e) => e.kind !== 'hierarchy').length;
+    parts.push(`<span>${UI_ICONS.graph} ${n} links hidden until you select or hover a ticket <button data-b="alllinks">Show all</button></span>`);
+  }
   if (cycles.length) {
     parts.push(`<span class="warn">${UI_ICONS.warn} ${cycles.length} dependency cycle${cycles.length > 1 ? 's' : ''}: ${cycles.map((c) => c.join(' ⇄ ')).slice(0, 2).map(esc).join(', ')} <button data-b="cycles">Show</button></span>`);
   }
@@ -1003,6 +1239,13 @@ function renderBanner() {
     b.addEventListener('click', () => {
       const a = b.dataset.b;
       if (a === 'unfocus') setFocus(undefined);
+      if (a === 'alllinks') {
+        ui.linkVisibility = 'all';
+        saveState();
+        syncToolbar();
+        render();
+        renderBanner();
+      }
       if (a === 'cycles') {
         highlight = new Set(cycles.flat());
         applyClasses();
@@ -1097,7 +1340,8 @@ function drawMinimap() {
     const oy = (H - lay.height * s) / 2;
     for (const n of [...lay.nodes.values()].sort((a, b) => a.depth - b.depth)) {
       const st = styleOf(byKey.get(n.key)!);
-      ctx.globalAlpha = n.group ? 0.18 : n.key === selected ? 1 : 0.75;
+      const lvl = lensMarks.get(n.key)?.level;
+      ctx.globalAlpha = n.group ? 0.18 : n.key === selected ? 1 : lvl === 'muted' ? 0.2 : lvl === 'primary' ? 1 : 0.75;
       ctx.fillStyle = st.color;
       ctx.fillRect(ox + n.x * s, oy + n.y * s, Math.max(1.5, n.w * s), Math.max(1.5, n.h * s));
     }
@@ -1139,6 +1383,9 @@ function syncToolbar() {
     seg.querySelectorAll<HTMLButtonElement>('button').forEach((b) => b.classList.toggle('on', b.dataset.v === ui[opt]));
   });
   $<HTMLSelectElement>('select[data-opt="routing"]').value = ui.routing;
+  $<HTMLSelectElement>('select[data-opt="linkVisibility"]').value = ui.linkVisibility ?? 'auto';
+  $<HTMLSelectElement>('select[data-opt="lens"]').value = ui.lens ?? 'none';
+  $<HTMLSelectElement>('select[data-opt="strategy"]').value = ui.strategy ?? 'hybrid';
   app.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((b) => {
     b.classList.toggle('on', !!ui[b.dataset.toggle as keyof UiState]);
   });
@@ -1155,6 +1402,29 @@ app.querySelectorAll<HTMLElement>('.seg').forEach((seg) =>
     void relayout({ fit: true });
   }),
 );
+function setLens(id: LensId) {
+  ui.lens = id;
+  saveState();
+  syncToolbar();
+  recomputeLens();
+  render();
+  renderLegend();
+  renderBanner();
+  renderDrawer();
+  drawMinimap();
+}
+$<HTMLSelectElement>('select[data-opt="strategy"]').addEventListener('change', (e) => {
+  ui.strategy = (e.target as HTMLSelectElement).value as LayoutStrategy;
+  saveState();
+  void relayout({ fit: true });
+});
+$<HTMLSelectElement>('select[data-opt="lens"]').addEventListener('change', (e) => setLens((e.target as HTMLSelectElement).value as LensId));
+$<HTMLSelectElement>('select[data-opt="linkVisibility"]').addEventListener('change', (e) => {
+  ui.linkVisibility = (e.target as HTMLSelectElement).value as UiState['linkVisibility'];
+  saveState();
+  render();
+  renderBanner();
+});
 $<HTMLSelectElement>('select[data-opt="routing"]').addEventListener('change', (e) => {
   ui.routing = (e.target as HTMLSelectElement).value as UiState['routing'];
   saveState();
@@ -1178,6 +1448,7 @@ app.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((b) =>
     if (a === 'zoomReset') zoomAt(1 / view.k);
     if (a === 'fit') fit();
     if (a === 'refresh') post({ type: 'refresh' });
+    if (a === 'syncNow') post({ type: 'syncNow' });
     if (a === 'collapseAll') {
       // Collapsing every parent gives progressive disclosure: expanding one level reveals collapsed children.
       for (const k of childrenOf.keys()) collapsed.add(k);
@@ -1235,6 +1506,9 @@ document.addEventListener('keydown', (e) => {
     if (highlight) (highlight = undefined), applyClasses();
     else if (selected) select(undefined);
     else if (focus) setFocus(undefined);
+  } else if (e.key === 'l' || e.key === 'L') {
+    const cur = LENS_ORDER.indexOf(ui.lens ?? 'none');
+    setLens(LENS_ORDER[(cur + (e.shiftKey ? LENS_ORDER.length - 1 : 1)) % LENS_ORDER.length]);
   } else if (selected && (e.key === 'e' || e.key === 'E')) post({ type: 'expand', keys: [selected] });
   else if (selected && (e.key === 'h' || e.key === 'H')) hideKey(selected);
   else if (selected && e.key === 'Enter') post({ type: 'openIssue', key: selected });
@@ -1337,6 +1611,118 @@ function showError(message: string) {
   overlay.classList.add('open');
 }
 
+// ── Live sync ───────────────────────────────────────────────────────────────
+let syncState: Extract<HostMessage, { type: 'syncState' }> | undefined;
+let lastInteraction = 0;
+let pendingRelayout: { flash: string[] } | undefined;
+let lastActivityPost = 0;
+
+/** Tell the host about user actions (throttled); it drives the sync cadence. */
+function noteActivity() {
+  lastInteraction = Date.now();
+  if (lastInteraction - lastActivityPost > 1000) {
+    lastActivityPost = lastInteraction;
+    post({ type: 'activity' });
+  }
+}
+for (const ev of ['pointerdown', 'wheel', 'keydown'] as const) window.addEventListener(ev, noteActivity, { passive: true, capture: true });
+searchInput.addEventListener('input', noteActivity);
+
+const interacting = () => !!pan || menu.classList.contains('open') || Date.now() - lastInteraction < 1500;
+
+/** Relative time, compact: "now", "12s", "3m". */
+function ago(t?: number): string {
+  if (!t) return '—';
+  const s = Math.round((Date.now() - t) / 1000);
+  return s < 5 ? 'now' : s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
+}
+
+function renderLive() {
+  const btn = $<HTMLButtonElement>('.live');
+  const st = syncState;
+  if (!st) return;
+  btn.dataset.phase = st.error ? 'error' : st.syncing ? 'syncing' : st.phase;
+  const label = st.phase === 'off' ? 'sync off' : st.phase === 'paused' ? 'paused' : st.syncing ? 'syncing…' : `live · ${ago(st.lastSyncAt)}`;
+  $<HTMLElement>('.live-text').textContent = st.error ? 'sync error' : label;
+  const next = st.nextRunAt ? Math.max(0, Math.round((st.nextRunAt - Date.now()) / 1000)) : undefined;
+  btn.title = [
+    st.error ? `Last sync failed: ${st.error}` : `Last sync: ${ago(st.lastSyncAt)}`,
+    st.phase === 'paused' ? 'Paused while the window is unfocused or the graph is hidden.' : st.phase === 'off' ? 'Sync is disabled (jiraGraph.sync.enabled).' : `Mode: ${st.phase === 'cooldown' ? 'active (fast)' : 'idle'}${next !== undefined ? ` · next in ${next}s` : ''}`,
+    'Click to sync now.',
+  ].join('\n');
+}
+setInterval(renderLive, 5000);
+
+/** Apply an incremental update: redraw in place when the visible structure is unchanged, otherwise relayout when the user is not interacting. */
+function applySync(next: GraphModel, diff: SyncDiff) {
+  const prevKeys = new Set(visible.issues.map((i) => i.key));
+  const prevLinks = new Set(visible.links.map((l) => l.id));
+  const prevParents = new Map(visible.issues.map((i) => [i.key, i.parentKey]));
+  const renamedFrom = new Map(diff.renamed);
+  if (selected && renamedFrom.has(selected)) selected = renamedFrom.get(selected);
+  const removedNow = diff.removed.filter((k) => prevKeys.has(k));
+
+  model = next;
+  indexModel(model);
+  recomputeLens();
+  if (selected && !byKey.has(selected)) {
+    toast(`${selected} is no longer available (deleted, moved or no access).`);
+    selected = undefined;
+  }
+  const nv = computeVisible();
+  const structural =
+    nv.issues.length !== prevKeys.size ||
+    nv.issues.some((i) => !prevKeys.has(i.key) || prevParents.get(i.key) !== i.parentKey) ||
+    nv.links.length !== prevLinks.size ||
+    nv.links.some((l) => !prevLinks.has(l.id));
+  const flash = [...diff.changed, ...diff.added, ...diff.renamed.map(([, k]) => k)];
+  const parts = [
+    diff.changed.length ? `${diff.changed.length} changed` : '',
+    diff.added.length ? `${diff.added.length} added` : '',
+    diff.renamed.length ? `${diff.renamed.length} moved` : '',
+    diff.removed.length ? `${diff.removed.length} removed (${diff.removed.slice(0, 3).join(', ')}${diff.removed.length > 3 ? '…' : ''})` : '',
+  ].filter(Boolean);
+  if (parts.length) toast(`Jira: ${parts.join(' · ')}`);
+
+  if (!structural) {
+    visible = nv;
+    render();
+    renderDrawer();
+    renderLegend();
+    renderBanner();
+    renderStats();
+    flashNodes(flash);
+    return;
+  }
+  // Removed tickets fade out in place before the layout closes the gap.
+  for (const k of removedNow) nodeEls.get(k)?.classList.add('gone');
+  pendingRelayout = { flash: [...(pendingRelayout?.flash ?? []), ...flash] };
+  setTimeout(tryPendingRelayout, removedNow.length ? 900 : 0);
+}
+
+function tryPendingRelayout() {
+  if (!pendingRelayout) return;
+  if (interacting()) {
+    setTimeout(tryPendingRelayout, 500);
+    return;
+  }
+  const { flash } = pendingRelayout;
+  pendingRelayout = undefined;
+  renderDrawer();
+  void relayout().then(() => flashNodes(flash));
+}
+
+function flashNodes(keys: string[]) {
+  for (const k of keys) {
+    const g = nodeEls.get(k);
+    if (!g) continue;
+    g.classList.remove('flash');
+    void g.getBoundingClientRect();
+    g.classList.add('flash');
+    setTimeout(() => g.classList.remove('flash'), 2600);
+  }
+}
+
 // ── Host messages ───────────────────────────────────────────────────────────
 window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
   const m = e.data;
@@ -1347,7 +1733,15 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
     case 'error':
       showError(m.message);
       break;
+    case 'syncState':
+      syncState = m;
+      renderLive();
+      break;
     case 'graph': {
+      if (m.reason === 'sync' && model && lay) {
+        applySync(m.model, m.diff!);
+        break;
+      }
       app.classList.remove('busy');
       overlay.classList.remove('open');
       const isNewSource = !model || JSON.stringify(model.source) !== JSON.stringify(m.model.source);
@@ -1362,6 +1756,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       }
       saveState();
       indexModel(model);
+      recomputeLens();
       if (selected && !byKey.has(selected)) selected = undefined;
       syncToolbar();
       renderDrawer();

@@ -181,6 +181,20 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   register('jiraGraph.refresh', () => GraphPanel.active?.reload());
+  register('jiraGraph.syncNow', () => GraphPanel.active?.syncNow());
+  register('jiraGraph.demoSimulate', async () => {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: '$(arrow-right) Move a ticket to the next status', id: 'change' },
+        { label: '$(add) Create a story under SHOP-30', id: 'create' },
+        { label: '$(trash) Delete SHOP-14', id: 'delete' },
+      ],
+      { title: 'Jira Graph: simulate a change in the demo data (seen by the next sync)' },
+    );
+    if (!pick) return;
+    const key = pick.id === 'change' ? demo.simulateChange() : pick.id === 'create' ? demo.simulateCreate() : demo.simulateDelete('SHOP-14');
+    vscode.window.setStatusBarMessage(`Demo: ${pick.id} ${key}`, 3000);
+  });
   register('jiraGraph.focusGraph', () => GraphPanel.active?.reveal());
   register('jiraGraph.copyMermaid', () => GraphPanel.active?.copyMermaid());
 

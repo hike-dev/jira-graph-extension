@@ -79,6 +79,22 @@ export class JiraClient implements IssueSource {
     }
   }
 
+  /** Cloud bulk fetch reports existing issues only; anything missing is deleted or no longer visible. */
+  async presence(ids: string[], signal?: AbortSignal): Promise<Map<string, string>> {
+    if (this.conn.deployment !== 'cloud') throw new JiraError('bulkfetch is Cloud only', 501);
+    const out = new Map<string, string>();
+    for (let i = 0; i < ids.length; i += 100) {
+      const res = await this.request<{ issues: { id: string; key: string }[] }>(
+        'POST',
+        '/rest/api/3/issue/bulkfetch',
+        { issueIdsOrKeys: ids.slice(i, i + 100), fields: ['updated'] },
+        signal,
+      );
+      for (const x of res.issues) out.set(x.id, x.key);
+    }
+    return out;
+  }
+
   async search(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]> {
     return this.conn.deployment === 'cloud'
       ? this.searchCloud(jql, fields, max, signal)

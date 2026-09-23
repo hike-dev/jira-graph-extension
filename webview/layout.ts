@@ -30,9 +30,24 @@ export interface LayoutEdge {
   spline: boolean;
 }
 
+export interface LayoutFrame {
+  /** Parent whose packed children the frame surrounds; empty for the "no parent" grid. */
+  parent: string;
+  label?: string;
+  /** Fan cluster: synthetic id used as the endpoint of its bundled edge, and the tickets inside. */
+  id?: string;
+  members?: string[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface LayoutResult {
   nodes: Map<string, LayoutNode>;
   edges: LayoutEdge[];
+  /** Tree mode: frames around children packed into a grid under their parent. */
+  frames: LayoutFrame[];
   width: number;
   height: number;
 }
@@ -47,11 +62,24 @@ export interface LayoutInput {
   routing: ViewOptions['edgeRouting'];
   showHierarchy: boolean;
   showLabels: boolean;
-  /** When false, cross links do not influence node placement and are drawn as overlays. */
+  /**
+   * When true, dependency ("blocks") links shape node placement. Other link types, and large
+   * fan-ins, are always drawn on top so they cannot stretch a layer into a very long row.
+   */
   linksAffectLayout: boolean;
+  /**
+   * explicit — every relation shapes the layout and nothing is packed (full relations overview).
+   * hybrid   — every relation shapes the layout; only tickets without any relation are packed.
+   * compact  — only dependencies shape the layout; fan-ins and unconnected tickets are packed.
+   */
+  strategy?: LayoutStrategy;
+  /** Ids of the links fed to ELK (computed by `layout`). */
+  elkLinks?: Set<string>;
 }
 
-export const GROUP_HEADER = 58;
+export type LayoutStrategy = 'explicit' | 'hybrid' | 'compact';
+
+export const GROUP_HEADER = 64;
 const PAD = 14;
 
 export function nodeSize(style: TypeStyle): { w: number; h: number } {
@@ -63,14 +91,57 @@ export function nodeSize(style: TypeStyle): { w: number; h: number } {
 const elk = new ELK();
 
 type EdgeMeta = Omit<LayoutEdge, 'points' | 'labelPos' | 'spline'>;
-type Part = LayoutResult & { overlay: EdgeMeta[] };
+type Part = LayoutResult & { overlay: EdgeMeta[]; lone?: boolean };
 
-export async function layout(input: LayoutInput): Promise<LayoutResult> {
+/** A node with more than this many single-link neighbours draws those links as overlays. */
+const FAN = 6;
+/** Containers with at least this many unconnected leaves pack them into a grid. */
+const GRID_MIN = 6;
+
+function pickLayoutLinks(input: LayoutInput): Set<string> {
+  if (!input.linksAffectLayout) return new Set();
+  const keys = new Set(input.issues.map((i) => i.key));
+  if ((input.strategy ?? 'hybrid') !== 'compact') {
+    // Explicit relations: every visible link takes part in the layout.
+    return new Set(input.links.filter((l) => l.from !== l.to && keys.has(l.from) && keys.has(l.to)).map((l) => l.id));
+  }
+  const hasChildren = new Set(input.issues.map((i) => i.parentKey).filter((k): k is string => !!k && keys.has(k)));
+  const byKey = new Map(input.issues.map((i) => [i.key, i]));
+  const top = (k: string) => {
+    const seen = new Set<string>();
+    for (let p = byKey.get(k)?.parentKey; p && keys.has(p) && !seen.has(p); p = byKey.get(p)?.parentKey) seen.add(p), (k = p);
+    return k;
+  };
+  // Compact, nested mode: containers are the structure, so only links inside one top-level container shape
+  // the layout; links between containers are overlays and each container packs independently.
+  const cand = input.links.filter(
+    (l) => l.category === 'blocks' && l.from !== l.to && keys.has(l.from) && keys.has(l.to) && (input.mode !== 'nested' || top(l.from) === top(l.to)),
+  );
+  const degree = new Map<string, number>();
+  for (const l of cand) for (const k of [l.from, l.to]) degree.set(k, (degree.get(k) ?? 0) + 1);
+  const isLeaf = (k: string) => degree.get(k) === 1 && !hasChildren.has(k);
+  const fans = new Map<string, string[]>();
+  for (const l of cand) {
+    for (const [hub, leaf] of [[l.from, l.to], [l.to, l.from]]) {
+      if (!isLeaf(leaf) || isLeaf(hub)) continue;
+      if (!fans.has(hub)) fans.set(hub, []);
+      fans.get(hub)!.push(l.id);
+    }
+  }
+  const dropped = new Set([...fans.values()].filter((ids) => ids.length > FAN).flat());
+  return new Set(cand.filter((l) => !dropped.has(l.id)).map((l) => l.id));
+}
+
+export async function layout(raw: LayoutInput): Promise<LayoutResult> {
+  const input = { ...raw, elkLinks: pickLayoutLinks(raw) };
   // ELK does not separate connected components under INCLUDE_CHILDREN, so for nested mode
   // lay out each component on its own and shelf-pack them. (Packed nested mode needs no split.)
-  const parts = input.mode === 'nested' && input.linksAffectLayout ? await Promise.all(components(input).map((c) => layoutPart({ ...input, ...c }))) : [await layoutPart(input)];
+  const parts = input.mode === 'nested' && input.linksAffectLayout ? await Promise.all(components(input).map(async (c) => ({ ...(await layoutPart({ ...input, ...c })), lone: c.lone }))) : [await layoutPart(input)];
   const merged = pack(parts);
+  const seen = new Set<string>();
   for (const m of parts.flatMap((p) => p.overlay)) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
     const a = merged.nodes.get(m.from);
     const b = merged.nodes.get(m.to);
     if (!a || !b) continue;
@@ -80,7 +151,7 @@ export async function layout(input: LayoutInput): Promise<LayoutResult> {
   return merged;
 }
 
-function components(input: LayoutInput): { issues: GraphIssue[]; links: GraphLink[] }[] {
+function components(input: LayoutInput): { issues: GraphIssue[]; links: GraphLink[]; lone: boolean }[] {
   const byKey = new Map(input.issues.map((i) => [i.key, i]));
   const top = (k: string) => {
     const seen = new Set<string>();
@@ -96,8 +167,8 @@ function components(input: LayoutInput): { issues: GraphIssue[]; links: GraphLin
     uf.set(k, r);
     return r;
   };
-  if (input.linksAffectLayout) {
-    for (const l of input.links) if (byKey.has(l.from) && byKey.has(l.to)) uf.set(find(top(l.from)), find(top(l.to)));
+  for (const l of input.links) {
+    if (input.elkLinks?.has(l.id) && byKey.has(l.from) && byKey.has(l.to)) uf.set(find(top(l.from)), find(top(l.to)));
   }
   const groups = new Map<string, GraphIssue[]>();
   for (const i of input.issues) {
@@ -105,10 +176,17 @@ function components(input: LayoutInput): { issues: GraphIssue[]; links: GraphLin
     if (!groups.has(r)) groups.set(r, []);
     groups.get(r)!.push(i);
   }
-  return [...groups.values()].map((issues) => {
+  // Lone tickets go into one shared part, where the leaf grid packs them together
+  // (explicit keeps each one as its own component, as before).
+  const parents = new Set(input.issues.map((i) => i.parentKey).filter(Boolean));
+  const lone = input.strategy === 'explicit' ? [] : [...groups.values()].filter((g) => g.length === 1 && !parents.has(g[0].key)).flat();
+  const parts = [...groups.values()].filter((g) => !(g.length === 1 && !parents.has(g[0].key)));
+  if (lone.length) parts.push(lone);
+  return parts.map((issues) => {
+    const isLone = issues === lone;
     const keys = new Set(issues.map((i) => i.key));
     // Links spanning components (only when links do not affect layout) are drawn as overlays after packing.
-    return { issues, links: input.links.filter((l) => keys.has(l.from) || keys.has(l.to)) };
+    return { issues, lone: isLone, links: input.links.filter((l) => keys.has(l.from) || keys.has(l.to)) };
   });
 }
 
@@ -117,10 +195,11 @@ const GAP = 56;
 function pack(parts: Part[]): LayoutResult {
   if (parts.length === 1) return parts[0];
   const area = parts.reduce((a, p) => a + (p.width + GAP) * (p.height + GAP), 0);
-  const maxW = Math.max(Math.sqrt(area * 1.8), ...parts.map((p) => p.width));
-  const sorted = [...parts].sort((a, b) => b.height - a.height);
+  const maxW = Math.max(Math.sqrt(area * 1.6), ...parts.map((p) => p.width));
+  const sorted = [...parts].sort((a, b) => Number(!!a.lone) - Number(!!b.lone) || b.height - a.height);
   const nodes = new Map<string, LayoutNode>();
   const edges: LayoutEdge[] = [];
+  const frames: LayoutFrame[] = [];
   let x = 0;
   let y = 0;
   let rowH = 0;
@@ -135,11 +214,12 @@ function pack(parts: Part[]): LayoutResult {
         labelPos: e.labelPos && { x: e.labelPos.x + x, y: e.labelPos.y + y },
       });
     }
+    for (const f of p.frames) frames.push({ ...f, x: f.x + x, y: f.y + y });
     width = Math.max(width, x + p.width);
     rowH = Math.max(rowH, p.height);
     x += p.width + GAP;
   }
-  return { nodes, edges, width, height: y + rowH };
+  return { nodes, edges, frames, width, height: y + rowH };
 }
 
 async function layoutPart(input: LayoutInput): Promise<Part> {
@@ -222,25 +302,104 @@ async function layoutPart(input: LayoutInput): Promise<Part> {
   const label = (text: string) =>
     input.showLabels ? [{ text, width: input.measure(text) + 10, height: 16 }] : undefined;
 
+  const gridOptions = (aspect: string) => ({
+    'elk.hierarchyHandling': 'SEPARATE_CHILDREN',
+    'elk.algorithm': 'rectpacking',
+    'elk.aspectRatio': aspect,
+    'elk.spacing.nodeNode': '20',
+    'elk.padding': '[top=0,left=0,bottom=0,right=0]',
+  });
+  const strategy = input.strategy ?? 'hybrid';
+  const grids = strategy !== 'explicit';
+  // Hybrid packs only tickets without any relation; compact also packs tickets whose relations are overlays.
+  const related = new Set(
+    (strategy === 'hybrid' ? links : links.filter((l) => input.elkLinks?.has(l.id))).flatMap((l) => [l.from, l.to]),
+  );
+  const hierarchyGrids = new Set<string>();
   if (mode === 'edges' && input.showHierarchy) {
+    const kids = new Map<string, string[]>();
     for (const i of issues) {
       const p = parentOf(i.key);
-      if (!p) continue;
-      const id = `h:${p}>${i.key}`;
-      meta.set(id, { id, kind: 'hierarchy', from: p, to: i.key });
-      root.edges!.push({
-        id,
-        sources: [p],
-        targets: [i.key],
+      if (p) kids.set(p, [...(kids.get(p) ?? []), i.key]);
+    }
+    const hierEdge = (from: string, to: string, meta: EdgeMeta) => {
+      meta && root.edges!.push({
+        id: meta.id,
+        sources: [from],
+        targets: [to],
         layoutOptions: { 'elk.layered.priority.direction': '10', 'elk.layered.priority.shortness': '10', 'elk.layered.priority.straightness': '5' },
       });
+    };
+    for (const [p, list] of kids) {
+      // Many childless, unlinked children would form one very long row: pack them under a single connector.
+      const leaves = list.filter((k) => !kids.has(k) && !related.has(k));
+      const packKids = grids && leaves.length >= GRID_MIN ? new Set(leaves) : new Set<string>();
+      for (const k of list) {
+        if (packKids.has(k)) continue;
+        const id = `h:${p}>${k}`;
+        const m: EdgeMeta = { id, kind: 'hierarchy', from: p, to: k };
+        meta.set(id, m);
+        hierEdge(p, k, m);
+      }
+      if (!packKids.size) continue;
+      const gid = `__grid:${p}`;
+      hierarchyGrids.add(gid);
+      const moved = root.children!.filter((n) => packKids.has(n.id));
+      root.children = [...root.children!.filter((n) => !packKids.has(n.id)), { id: gid, children: moved, layoutOptions: gridOptions('2.4') }];
+      const m: EdgeMeta = { id: `h:${p}>${gid}`, kind: 'hierarchy', from: p, to: gid };
+      meta.set(m.id, m);
+      hierEdge(p, gid, m);
     }
   }
+  // ── Hybrid fan clusters: many tickets whose only relation is the same link to one hub are packed
+  // into a framed cluster joined to the hub by one bundled edge ("relates to ×40"). ──
+  const bundled = new Set<string>();
+  const fanFrames = new Map<string, { hub: string; label: string; members: string[] }>();
+  if (strategy === 'hybrid' && input.linksAffectLayout) {
+    const inLayout = links.filter((l) => l.from !== l.to && byKey.has(l.from) && byKey.has(l.to) && input.elkLinks?.has(l.id));
+    const degree = new Map<string, number>();
+    for (const l of inLayout) for (const k of [l.from, l.to]) degree.set(k, (degree.get(k) ?? 0) + 1);
+    const hasKids = new Set(issues.map((i) => parentOf(i.key)).filter((k): k is string => !!k));
+    const treeBound = (k: string) => mode === 'edges' && input.showHierarchy && (!!parentOf(k) || hasKids.has(k));
+    const leafOk = (k: string) => degree.get(k) === 1 && !groups.has(k) && !hasKids.has(k) && !treeBound(k);
+    const buckets = new Map<string, { hub: string; leafIsSource: boolean; container: string; label: string; category: LinkCategory; links: GraphLink[] }>();
+    for (const l of inLayout) {
+      for (const [leaf, hub, leafIsSource] of [[l.from, l.to, true], [l.to, l.from, false]] as const) {
+        if (!leafOk(leaf) || leafOk(hub)) continue;
+        const container = mode === 'nested' ? parentOf(leaf) ?? '__root' : '__root';
+        const id = `${hub}|${l.category}|${leafIsSource}|${container}`;
+        if (!buckets.has(id)) buckets.set(id, { hub, leafIsSource, container, label: l.label, category: l.category, links: [] });
+        buckets.get(id)!.links.push(l);
+      }
+    }
+    let n = 0;
+    for (const b of buckets.values()) {
+      if (b.links.length <= FAN) continue;
+      const gid = `__fan:${n++}`;
+      const members = b.links.map((l) => (b.leafIsSource ? l.from : l.to));
+      const memberSet = new Set(members);
+      const container = b.container === '__root' ? root : elkNodes.get(b.container)!;
+      const moved = container.children!.filter((c) => memberSet.has(c.id));
+      container.children = [...container.children!.filter((c) => !memberSet.has(c.id)), { id: gid, children: moved, layoutOptions: gridOptions('1.8') }];
+      b.links.forEach((l) => bundled.add(l.id));
+      const text = `${b.label} ×${members.length}`;
+      const m: EdgeMeta = { id: `l:${gid}`, kind: b.category, from: b.leafIsSource ? gid : b.hub, to: b.leafIsSource ? b.hub : gid, label: text };
+      meta.set(m.id, m);
+      root.edges!.push({ id: m.id, sources: [m.from], targets: [m.to], labels: label(text) });
+      fanFrames.set(gid, { hub: b.hub, label: `${members.length} × ${b.leafIsSource ? `${b.label} ${b.hub}` : `${b.hub} ${b.label}`}`, members });
+    }
+  }
+
   for (const l of links) {
-    if (!byKey.has(l.from) || !byKey.has(l.to) || l.from === l.to) continue;
+    if (l.from === l.to || bundled.has(l.id)) continue;
     const m = { id: `l:${l.id}`, kind: l.category, from: l.from, to: l.to, label: l.label };
+    // Links reaching into another component are drawn as overlays once all parts are packed.
+    if (!byKey.has(l.from) || !byKey.has(l.to)) {
+      overlay.push(m);
+      continue;
+    }
     const nestedConflict = mode === 'nested' && (isAncestor(l.from, l.to) || isAncestor(l.to, l.from));
-    if (!input.linksAffectLayout || nestedConflict) {
+    if (!input.elkLinks?.has(l.id) || nestedConflict) {
       overlay.push(m);
       continue;
     }
@@ -249,12 +408,58 @@ async function layoutPart(input: LayoutInput): Promise<Part> {
     root.edges!.push(e);
   }
 
+  // ── Grids: unconnected leaves are rect-packed instead of stretching a single layer ──
+  if (!packed && grids) {
+    const touched = new Set([...root.edges!.flatMap((e) => [...e.sources, ...e.targets]), ...related]);
+    const statusRank = { indeterminate: 0, new: 1, done: 2 } as const;
+    const sizeRank = { large: 0, normal: 1, small: 2 } as const;
+    const order = (a: ElkNode, b: ElkNode) => {
+      const ia = byKey.get(a.id)!;
+      const ib = byKey.get(b.id)!;
+      return (
+        sizeRank[styleOf(ia).size] - sizeRank[styleOf(ib).size] ||
+        statusRank[ia.statusCategory] - statusRank[ib.statusCategory] ||
+        ia.key.localeCompare(ib.key, undefined, { numeric: true })
+      );
+    };
+    for (const c of [root, ...[...groups].map((k) => elkNodes.get(k)!)]) {
+      const leaves = c.children!.filter((n) => !n.children && !touched.has(n.id)).sort(order);
+      if (leaves.length < GRID_MIN) continue;
+      const set = new Set(leaves);
+      c.children = [
+        ...c.children!.filter((n) => !set.has(n)),
+        {
+          id: `__grid:${c.id}`,
+          children: leaves,
+          layoutOptions: gridOptions(c === root ? '1.6' : '2.2'),
+        },
+      ];
+    }
+  }
+
   const out = await elk.layout(root);
 
   // ── Collect ──────────────────────────────────────────────────────────────
   const nodes = new Map<string, LayoutNode>();
+  const frames: LayoutFrame[] = [];
   const walk = (n: ElkNode) => {
     for (const c of n.children ?? []) {
+      if (c.id.startsWith('__fan:')) {
+        const f = fanFrames.get(c.id)!;
+        frames.push({ parent: f.hub, id: c.id, members: f.members, label: f.label, x: (c.x ?? 0) - 12, y: (c.y ?? 0) - 34, w: (c.width ?? 0) + 24, h: (c.height ?? 0) + 46 });
+        walk(c);
+        continue;
+      }
+      if (c.id.startsWith('__grid:')) {
+        if (hierarchyGrids.has(c.id)) {
+          frames.push({ parent: c.id.slice('__grid:'.length), x: (c.x ?? 0) - 10, y: (c.y ?? 0) - 10, w: (c.width ?? 0) + 20, h: (c.height ?? 0) + 20 });
+        } else if (c.id === '__grid:__root') {
+          const n = c.children?.length ?? 0;
+          frames.push({ parent: '', label: `${strategy === 'hybrid' ? 'No relations' : 'Unconnected'} · ${n}`, x: (c.x ?? 0) - 12, y: (c.y ?? 0) - 34, w: (c.width ?? 0) + 24, h: (c.height ?? 0) + 46 });
+        }
+        walk(c);
+        continue;
+      }
       nodes.set(c.id, {
         key: c.id,
         x: c.x ?? 0,
@@ -287,7 +492,7 @@ async function layoutPart(input: LayoutInput): Promise<Part> {
   };
   collectEdges(out);
 
-  return { nodes, edges, width: out.width ?? 0, height: out.height ?? 0, overlay };
+  return { nodes, edges, frames, width: out.width ?? 0, height: out.height ?? 0, overlay };
 }
 
 /** Cubic curve between two boxes, leaving/entering through the facing borders. */

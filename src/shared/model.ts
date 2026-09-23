@@ -17,9 +17,21 @@ export interface GraphIssue {
   parentKey?: string;
   storyPoints?: number;
   updated?: string;
+  created?: string;
+  /** When the issue last moved between To Do / In Progress / Done (Jira `statuscategorychangedate`). */
+  statusChangedAt?: string;
+  resolvedAt?: string;
+  dueDate?: string;
+  fixVersions?: string[];
+  sprints?: SprintRef[];
   url: string;
   /** false when the issue is only known as a reference (link / parent / subtask) and was not fetched. */
   loaded: boolean;
+}
+
+export interface SprintRef {
+  name: string;
+  state: 'active' | 'future' | 'closed';
 }
 
 export interface GraphLink {
@@ -65,13 +77,23 @@ export interface ViewOptions {
 }
 
 export type HostMessage =
-  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' }
+  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' | 'sync'; diff?: SyncDiff }
+  | { type: 'syncState'; phase: 'paused' | 'idle' | 'cooldown' | 'off'; lastSyncAt?: number; nextRunAt?: number; syncing?: boolean; error?: string }
   | { type: 'loading'; message: string }
   | { type: 'error'; message: string }
   | { type: 'focus'; key: string };
 
+export interface SyncDiff {
+  changed: string[];
+  added: string[];
+  removed: string[];
+  renamed: [string, string][];
+}
+
 export type WebviewMessage =
   | { type: 'ready' }
+  | { type: 'activity' }
+  | { type: 'syncNow' }
   | { type: 'openIssue'; key: string }
   | { type: 'expand'; keys: string[] }
   | { type: 'graphFrom'; key: string }

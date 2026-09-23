@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import { viewOptions, sessionOptions } from '../config';
+import { sessionOptions, syncTiming, viewOptions } from '../config';
 import { JiraError } from '../jira/client';
-import { GraphSession } from '../jira/graphSession';
+import { GraphSession, SyncResult } from '../jira/graphSession';
+import { SyncScheduler } from '../sync/scheduler';
 import { IssueSource } from '../jira/types';
 import { toMermaid } from '../mermaid';
 import { GraphModel, GraphSource, HostMessage, WebviewMessage } from '../shared/model';
@@ -40,6 +41,12 @@ export class GraphPanel {
   private ready = false;
   private pending: HostMessage[] = [];
   private readonly disposables: vscode.Disposable[] = [];
+  private scheduler: SyncScheduler | undefined;
+  private busy = false;
+  private lastSyncAt: number | undefined;
+  private syncErrors = 0;
+  private syncBlockedUntil = 0;
+  private syncError: string | undefined;
 
   static async open(ctx: PanelContext, source: GraphSource): Promise<GraphPanel | undefined> {
     const issues = await ctx.resolveSource(source);
@@ -88,8 +95,88 @@ export class GraphPanel {
         if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout')) {
           if (this.model) this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'update' });
         }
+        if (e.affectsConfiguration('jiraGraph.sync')) this.applySyncSettings();
       }),
+      vscode.window.onDidChangeWindowState((w) => this.scheduler?.setFocused(w.focused)),
+      panel.onDidChangeViewState((e) => this.scheduler?.setVisible(e.webviewPanel.visible)),
     );
+    this.startSync();
+  }
+
+  // ── Live sync ────────────────────────────────────────────────────────────────
+  private startSync() {
+    const t = syncTiming();
+    this.scheduler = new SyncScheduler(t, {
+      now: () => Date.now(),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h as NodeJS.Timeout),
+      run: () => this.syncOnce(),
+      onPhase: (phase, nextRunAt) => this.postSyncState(phase, nextRunAt),
+    });
+    this.scheduler.setEnabled(t.enabled);
+    this.scheduler.setFocused(vscode.window.state.focused);
+    this.scheduler.setVisible(this.panel.visible);
+  }
+
+  private applySyncSettings() {
+    const t = syncTiming();
+    this.scheduler?.setTiming(t);
+    this.scheduler?.setEnabled(t.enabled);
+    this.session?.setSyncOptions(sessionOptions());
+  }
+
+  private postSyncState(phase: 'paused' | 'idle' | 'cooldown', nextRunAt?: number) {
+    const enabled = syncTiming().enabled;
+    this.post({
+      type: 'syncState',
+      phase: enabled ? phase : 'off',
+      lastSyncAt: this.lastSyncAt,
+      nextRunAt,
+      syncing: this.busy,
+      error: this.syncError,
+    });
+  }
+
+  /** Force a sync soon (e.g. from the Sync Now command). Presence of every issue is re-checked too. */
+  syncNow() {
+    this.forcePresence = true;
+    this.scheduler?.now();
+  }
+  private forcePresence = false;
+
+  private async syncOnce() {
+    if (!this.model || this.busy || Date.now() < this.syncBlockedUntil) return;
+    this.busy = true;
+    this.postSyncState(this.scheduler!.phase);
+    const before = this.model;
+    try {
+      const r: SyncResult = await this.session!.sync({ forcePresence: this.forcePresence });
+      this.forcePresence = false;
+      this.syncErrors = 0;
+      this.syncError = undefined;
+      this.lastSyncAt = Date.now();
+      if (r.changed.length || r.added.length || r.removed.length || r.renamed.length) {
+        this.model = this.session!.toModel();
+        const diff = { changed: r.changed, added: r.added, removed: r.removed, renamed: r.renamed };
+        this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'sync', diff });
+        GraphPanel.modelEmitter.fire(this);
+      } else if (before !== this.model) {
+        // A full reload happened meanwhile; nothing to report.
+      }
+    } catch (e) {
+      this.syncErrors++;
+      this.syncError = (e as Error).message;
+      if (e instanceof JiraError && e.status === 401) {
+        this.scheduler?.setEnabled(false);
+        this.syncError = 'Jira rejected the credentials — sync stopped. Reconnect to resume.';
+      } else {
+        // Exponential back-off: 10s, 20s, 40s … capped at 5 minutes.
+        this.syncBlockedUntil = Date.now() + Math.min(300_000, 10_000 * 2 ** (this.syncErrors - 1));
+      }
+    } finally {
+      this.busy = false;
+      this.postSyncState(this.scheduler!.phase, this.scheduler!.nextRunAt());
+    }
   }
 
   private setActive() {
@@ -100,6 +187,7 @@ export class GraphPanel {
 
   private dispose() {
     this.abort?.abort();
+    this.scheduler?.dispose();
     GraphPanel.panels.delete(this);
     if (GraphPanel._active === this) {
       GraphPanel._active = [...GraphPanel.panels].pop();
@@ -133,12 +221,14 @@ export class GraphPanel {
   private async run(job: (progress: (m: string) => void, signal: AbortSignal) => Promise<void>, reason: 'init' | 'update') {
     this.abort?.abort();
     const abort = (this.abort = new AbortController());
+    this.busy = true;
     try {
       await job((message) => this.post({ type: 'loading', message }), abort.signal);
       if (abort.signal.aborted) return;
       this.model = this.session!.toModel();
       this.post({ type: 'graph', model: this.model, options: viewOptions(), reason });
       GraphPanel.modelEmitter.fire(this);
+      this.lastSyncAt = Date.now();
     } catch (e) {
       if (abort.signal.aborted) return;
       const msg = (e as Error).message;
@@ -147,6 +237,8 @@ export class GraphPanel {
         const pick = await vscode.window.showErrorMessage('Jira rejected the credentials.', 'Reconnect');
         if (pick) void vscode.commands.executeCommand('jiraGraph.configure');
       }
+    } finally {
+      if (this.abort === abort) this.busy = false;
     }
   }
 
@@ -155,6 +247,13 @@ export class GraphPanel {
       case 'ready':
         this.ready = true;
         this.pending.splice(0).forEach((p) => this.post(p));
+        this.postSyncState(this.scheduler?.phase ?? 'paused', this.scheduler?.nextRunAt());
+        break;
+      case 'activity':
+        this.scheduler?.activity();
+        break;
+      case 'syncNow':
+        this.syncNow();
         break;
       case 'openIssue':
         void vscode.commands.executeCommand('jiraGraph.openInBrowser', m.key);

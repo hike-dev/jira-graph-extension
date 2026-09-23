@@ -190,6 +190,19 @@
         "title": "Clear Recent Queries",
         "category": "Jira Graph",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "jiraGraph.demoSimulate",
+        "title": "Simulate a Change in the Demo",
+        "category": "Jira Graph",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "jiraGraph.syncNow",
+        "title": "Sync Now",
+        "category": "Jira Graph",
+        "icon": "$(sync)",
+        "enablement": "jiraGraph.hasGraph"
       }
     ],
     "menus": {
@@ -426,6 +439,11 @@
           "default": "",
           "markdownDescription": "Optional field id for story points (e.g. `customfield_10016`)."
         },
+        "jiraGraph.sprintField": {
+          "type": "string",
+          "default": "customfield_10020",
+          "markdownDescription": "Field id of **Sprint**, used by the Planning lens. `customfield_10020` on most Jira Cloud sites; find yours via *Jira settings → Issues → Custom fields*."
+        },
         "jiraGraph.layout.direction": {
           "type": "string",
           "enum": [
@@ -516,6 +534,47 @@
               }
             }
           }
+        },
+        "jiraGraph.sync.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep open graphs in sync with Jira (incremental; paused while the window is unfocused or the graph is hidden)."
+        },
+        "jiraGraph.sync.idleIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 5,
+          "description": "Sync interval while the window is focused but you are not interacting with the graph."
+        },
+        "jiraGraph.sync.activityDebounceSeconds": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "After an action in the graph, sync this long after the last action."
+        },
+        "jiraGraph.sync.cooldownSeconds": {
+          "type": "number",
+          "default": 180,
+          "minimum": 0,
+          "description": "How long after the last action the faster cooldown interval applies."
+        },
+        "jiraGraph.sync.cooldownIntervalSeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 2,
+          "description": "Sync interval during the cooldown period."
+        },
+        "jiraGraph.sync.overlapSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "description": "Each sync re-reads this much before its cursor, to catch issues the Jira search index surfaced late."
+        },
+        "jiraGraph.sync.presenceCheckMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "How often to check that loaded issues still exist (deleted, no access, or moved to another project)."
         }
       }
     }

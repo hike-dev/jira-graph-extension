@@ -3,6 +3,7 @@ import { Deployment, JiraClient, JiraConnection } from './jira/client';
 import { SessionOptions } from './jira/graphSession';
 import type { ProjectRef } from './shared/jql';
 import { TypeStyleOverride, ViewOptions } from './shared/model';
+import type { SyncTiming } from './sync/scheduler';
 
 const TOKEN_KEY = 'jiraGraph.token';
 
@@ -23,6 +24,21 @@ export function sessionOptions(): SessionOptions {
     includeChildren: c.get<boolean>('includeChildren', true),
     epicLinkField: c.get<string>('epicLinkField') || undefined,
     storyPointsField: c.get<string>('storyPointsField') || undefined,
+    sprintField: c.get<string>('sprintField', 'customfield_10020') || undefined,
+    overlapMs: c.get<number>('sync.overlapSeconds', 300) * 1000,
+    presenceIntervalMs: c.get<number>('sync.presenceCheckMinutes', 10) * 60_000,
+  };
+}
+
+export function syncTiming(): SyncTiming & { enabled: boolean } {
+  const c = cfg();
+  const s = (k: string, d: number) => Math.max(0, c.get<number>(`sync.${k}`, d)) * 1000;
+  return {
+    enabled: c.get<boolean>('sync.enabled', true),
+    idleIntervalMs: s('idleIntervalSeconds', 60),
+    debounceMs: s('activityDebounceSeconds', 2),
+    cooldownMs: s('cooldownSeconds', 180),
+    cooldownIntervalMs: s('cooldownIntervalSeconds', 10),
   };
 }
 
