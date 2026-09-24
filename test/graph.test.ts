@@ -450,3 +450,100 @@ test('load scope: sprint always, graded backlog, recent done, context, +N more, 
   assert.equal(m3.scopeInfo!.omitted['SHOP-30'], undefined, 'nothing left out under SHOP-30');
   assert.equal(m3.issues.find((i) => i.key === 'SHOP-34')?.scope?.tier, 'requested');
 });
+
+test('filter by ticket: relation depth, direction, relation kinds, optional subtree', async () => {
+  const { reachable, DEFAULT_ANCHOR } = await import('../webview/filter');
+  const { model } = await demoModel();
+  const r = (patch: Record<string, unknown>) => {
+    const m = reachable(model.issues, model.links, { ...DEFAULT_ANCHOR, keys: ['SHOP-21'], depth: 1, ...patch } as never);
+    return [...m.keys()].sort();
+  };
+  assert.deepEqual(r({}), ['PLAT-7', 'SHOP-20', 'SHOP-21', 'SHOP-211', 'SHOP-212', 'SHOP-22', 'SHOP-23'].sort(), 'both directions, all kinds, 1 hop');
+  assert.deepEqual(r({ direction: 'up' }), ['PLAT-7', 'SHOP-20', 'SHOP-21', 'SHOP-23'], 'prerequisites: blockers + parent');
+  assert.deepEqual(r({ direction: 'down' }), ['SHOP-21', 'SHOP-211', 'SHOP-212', 'SHOP-22'], 'subsequent: what it blocks + children');
+  assert.deepEqual(r({ direction: 'down', via: ['blocks'], depth: 2 }), ['SHOP-12', 'SHOP-21', 'SHOP-22'], 'blocks chain, 2 hops');
+  const dist = reachable(model.issues, model.links, { ...DEFAULT_ANCHOR, keys: ['SHOP-21'], depth: 2, direction: 'down', via: ['blocks'], subtree: false });
+  assert.equal(dist.get('SHOP-12'), 2);
+  // relates has no direction: followed even with "up".
+  const rel = reachable(model.issues, model.links, { ...DEFAULT_ANCHOR, keys: ['SHOP-11'], depth: 1, direction: 'up', via: ['relates'], subtree: false });
+  assert.ok(rel.has('SHOP-13') && rel.has('SHOP-14'));
+  // Subtree: every descendant of each reached ticket, even when hierarchy is not followed.
+  const sub = reachable(model.issues, model.links, { ...DEFAULT_ANCHOR, keys: ['SHOP-10'], depth: 1, direction: 'both', via: ['blocks'], subtree: true });
+  for (const k of ['SHOP-11', 'SHOP-111', 'SHOP-112', 'SHOP-12', 'SHOP-13', 'SHOP-14']) assert.ok(sub.has(k), k);
+  assert.equal(sub.get('SHOP-111'), 2, 'descendant distance = ancestor + 1 per level');
+  // Unlimited depth follows the whole blocks chain.
+  const all = reachable(model.issues, model.links, { ...DEFAULT_ANCHOR, keys: ['PLAT-40'], depth: 0, direction: 'down', via: ['blocks'], subtree: false });
+  assert.deepEqual([...all.keys()].sort(), ['PLAT-40', 'SHOP-31', 'SHOP-33']);
+});
+
+test('disk cache: round trip, fingerprint/version/age checks, corrupt files, size cap', async () => {
+  const { GraphCache, CACHE_VERSION } = await import('../src/jira/cache');
+  const { mkdtemp, writeFile, readdir, utimes } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'jg-cache-'));
+  const c = new GraphCache({ dir, maxAgeMs: 1000 * 60, maxBytes: 10_000 });
+  await c.save('graph-a', 'fp1', { hello: 'world' }, 1_000);
+  assert.deepEqual((await c.load('graph-a', 'fp1', 2_000))?.data, { hello: 'world' });
+  assert.equal(await c.load('graph-a', 'fp2', 2_000), undefined, 'fingerprint mismatch');
+  assert.equal(await c.load('graph-a', 'fp1', 1_000 + 61_000), undefined, 'too old');
+  assert.equal(await c.load('graph-b', 'fp1', 2_000), undefined, 'missing');
+  const [file] = (await readdir(dir)).filter((n) => n.endsWith('.json'));
+  await writeFile(join(dir, file), '{ not json');
+  assert.equal(await c.load('graph-a', 'fp1', 2_000), undefined, 'corrupt file → cold load');
+  await writeFile(join(dir, file), JSON.stringify({ version: CACHE_VERSION + 1, fingerprint: 'fp1', savedAt: 1_000, data: {} }));
+  assert.equal(await c.load('graph-a', 'fp1', 2_000), undefined, 'other format version');
+  // Size cap: the least recently written file goes first.
+  const now = Date.now();
+  const big = 'x'.repeat(4_000);
+  await c.save('g1', 'f', big, now);
+  await utimes(join(dir, (await readdir(dir)).find((n) => n.startsWith('graph-') && n.endsWith('.json'))!), new Date(now - 30_000), new Date(now - 30_000));
+  await c.save('g2', 'f', big, now);
+  await c.save('g3', 'f', big, now);
+  assert.equal(await c.load('g1', 'f', now), undefined, 'least recently written dropped to stay under the cap');
+  assert.ok(await c.load('g2', 'f', now) && (await c.load('g3', 'f', now)), 'newer ones kept');
+  // Orphaned temp files from a crashed write are removed.
+  await writeFile(join(dir, 'graph-x.json.1.1.tmp'), 'partial');
+  await utimes(join(dir, 'graph-x.json.1.1.tmp'), new Date(now - 120_000), new Date(now - 120_000));
+  await c.prune(now);
+  assert.ok(!(await readdir(dir)).some((n) => n.endsWith('.tmp')));
+  await c.clear();
+  assert.equal(await c.load('g3', 'f', now), undefined, 'cleared');
+});
+
+test('session snapshot: restore without requests, re-scope locally, then catch up by sync', async () => {
+  const src = new DemoSource();
+  let searches = 0;
+  const orig = src.searchPage.bind(src);
+  src.searchPage = async (...a) => ((searches += 1), orig(...a));
+  const scope = { enabled: true, backlog: 2, doneDays: 14, future: true, context: true };
+  const source = { kind: 'jql' as const, jql: 'project = SHOP ORDER BY updated DESC', scope };
+  const a = new GraphSession(src, source, { ...opts, overlapMs: 60_000 });
+  await a.load(() => {});
+  const snap = JSON.parse(JSON.stringify(a.snapshot()));
+  // Compared as JSON: that is what reaches the webview (undefined-valued keys disappear either way).
+  const strip = (m: ReturnType<typeof a.toModel>) => JSON.parse(JSON.stringify({ ...m, fetchedAt: '' }));
+
+  searches = 0;
+  const b = new GraphSession(src, { ...source, scope: { ...scope } }, { ...opts, overlapMs: 60_000 });
+  await b.restore(snap);
+  assert.equal(searches, 0, 'restore makes no request');
+  assert.deepEqual(strip(b.toModel()), strip(a.toModel()), 'same graph as before');
+  assert.equal(JSON.stringify(b.cacheKey()), JSON.stringify(a.cacheKey()), 'same cache identity');
+
+  // Scope settings changed since the snapshot: re-scope from the cached index, still no request.
+  const c = new GraphSession(src, { ...source, scope: { ...scope, backlog: 0 } }, { ...opts, overlapMs: 60_000 });
+  await c.restore(snap);
+  assert.equal(searches, 0);
+  assert.equal(c.toModel().scopeInfo!.backlog.shown, 0);
+
+  // Something changed in Jira after the snapshot: the first sync picks it up from the saved cursor.
+  const changed = src.simulateChange();
+  await new Promise((r) => setTimeout(r, 5));
+  const r = await b.sync();
+  assert.ok(r.changed.includes(changed) || r.added.includes(changed), `caught up on ${changed}`);
+  assert.equal(r.checkedPresence, true, 'deletion check runs on the first sync after a restore');
+
+  // Demo graphs are never cached.
+  assert.equal(new GraphSession(src, { kind: 'demo' }, opts).cacheKey(), undefined);
+});

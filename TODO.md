@@ -9,7 +9,10 @@ Parked ideas and open questions, roughly by priority within each section.
 - [ ] Run the extension end to end in VS Code against the bound project (only the webview and unit tests were exercised headless).
 
 ## Live sync
-- [ ] Persist the local store + cursor to disk: instant open from cache, then catch up.
+- [x] Persist the local store + cursor to disk: instant open from cache, then catch up.
+- [ ] Cache node positions for an instant, stable first paint (layout in the background).
+- [ ] Cold open: sprint tier first, then the rest; parallel partitioned index queries.
+- [ ] Persist descriptions (keyed by `updated`); share one cache file across windows with a single writer.
 - [ ] Early presence check when `approximate-count` of the source query drops.
 - [ ] Change history view: last N changes (field old → new, who, when), "since I last looked".
 - [ ] Old → new status chip on changed cards for a few seconds; "changed" dot until seen.

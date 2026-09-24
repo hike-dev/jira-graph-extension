@@ -203,6 +203,12 @@
         "category": "Jira Graph",
         "icon": "$(sync)",
         "enablement": "jiraGraph.hasGraph"
+      },
+      {
+        "command": "jiraGraph.clearCache",
+        "title": "Clear Cache",
+        "category": "Jira Graph",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -631,6 +637,23 @@
           "minimum": 100,
           "maximum": 10000,
           "description": "Sprint scope: most tickets indexed from the query to choose from."
+        },
+        "jiraGraph.cache.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep a disk cache of each graph (tickets as Jira returned them, the sync cursor) so graphs open instantly and then catch up with a small delta query. Stored in VS Code's extension storage as plain JSON; never contains the token. Turning this off deletes the cache."
+        },
+        "jiraGraph.cache.maxAgeDays": {
+          "type": "number",
+          "default": 14,
+          "minimum": 1,
+          "description": "Cached graphs older than this are rebuilt with a full load."
+        },
+        "jiraGraph.cache.maxSizeMB": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Size cap of the disk cache; least recently used graphs are dropped first."
         }
       }
     }

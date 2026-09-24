@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { chooseProject, configure, currentProject, defaultScope, getConnection, refreshConfiguredContext, scopeJql, SavedQuery, savedQueries, setSavedQueries, signOut } from './config';
+import { cacheOptions, chooseProject, configure, currentProject, defaultScope, getConnection, refreshConfiguredContext, scopeJql, SavedQuery, savedQueries, setSavedQueries, signOut } from './config';
+import { GraphCache } from './jira/cache';
 import { JiraClient } from './jira/client';
 import { DemoSource } from './jira/demoSource';
 import { IssueSource } from './jira/types';
@@ -15,8 +16,13 @@ export function activate(context: vscode.ExtensionContext) {
   const demo = new DemoSource();
   void refreshConfiguredContext(secrets);
 
+  const cacheDir = vscode.Uri.joinPath(context.globalStorageUri, 'graph-cache').fsPath;
   const ctx: PanelContext = {
     extensionUri: context.extensionUri,
+    cache() {
+      const o = cacheOptions();
+      return o.enabled ? new GraphCache({ dir: cacheDir, maxAgeMs: o.maxAgeMs, maxBytes: o.maxBytes }) : undefined;
+    },
     async resolveSource(source: GraphSource): Promise<IssueSource | undefined> {
       if (source.kind === 'demo' || (source.kind === 'keys' && source.demo)) return demo;
       let conn = await getConnection(secrets);
@@ -71,6 +77,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('jiraGraph.queries') || e.affectsConfiguration('jiraGraph.project')) queries.refresh();
       if (e.affectsConfiguration('jiraGraph.project')) void refreshConfiguredContext(secrets);
+      if (e.affectsConfiguration('jiraGraph.cache.enabled') && !cacheOptions().enabled) void vscode.commands.executeCommand('jiraGraph.clearCache');
       if (e.affectsConfiguration('jiraGraph.baseUrl')) void refreshConfiguredContext(secrets);
     }),
     vscode.window.registerWebviewPanelSerializer(GraphPanel.viewType, {
@@ -184,6 +191,10 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   register('jiraGraph.refresh', () => GraphPanel.active?.reload());
+  register('jiraGraph.clearCache', async () => {
+    await new GraphCache({ dir: cacheDir, maxAgeMs: 1, maxBytes: 1 }).clear();
+    vscode.window.showInformationMessage('Jira Graph: cache cleared. Open graphs keep working; they rebuild the cache on the next change.');
+  });
   register('jiraGraph.syncNow', () => GraphPanel.active?.syncNow());
   register('jiraGraph.demoSimulate', async () => {
     const pick = await vscode.window.showQuickPick(

@@ -1,9 +1,10 @@
 import type { GraphIssue } from '../src/shared/model';
 import { STAGE_LABELS, type Stage } from '../src/shared/stages';
 import {
-  activeCount, EMPTY_FILTER, facetCount, facetOptions, FacetKey, FilterContext, FilterState, FLAG_LABELS, FlagId,
-  isActive, matchesFilter, NONE, sortMatches, SortKey,
+  activeCount, ANCHOR_VIA, AnchorFilter, DEFAULT_ANCHOR, EMPTY_FILTER, facetCount, facetOptions, FacetKey, FilterContext, FilterState,
+  FLAG_LABELS, FlagId, isActive, matchesFilter, NONE, reachable, sortMatches, SortKey,
 } from './filter';
+import type { GraphLink } from '../src/shared/model';
 import { UI_ICONS } from './icons';
 
 // Toolbar filter box + facet popover + a collapsible, resizable results list with prev/next stepping.
@@ -20,6 +21,7 @@ export interface FilterPanelContext {
   app: HTMLElement;
   stage: HTMLElement;
   issues: () => GraphIssue[];
+  links: () => GraphLink[];
   filterCtx: () => FilterContext;
   /** Layout position of a visible ticket (undefined when it is not drawn). */
   position: (key: string) => { x: number; y: number } | undefined;
@@ -48,6 +50,8 @@ export class FilterPanel {
   private matches: GraphIssue[] = [];
   private index = -1;
   readonly matchSet = new Set<string>();
+  /** Hops from the anchor ticket(s), when "Related to ticket" is set. */
+  private reach: Map<string, number> | undefined;
   private readonly input: HTMLInputElement;
   private readonly box: HTMLElement;
   private readonly pop: HTMLElement;
@@ -84,10 +88,10 @@ export class FilterPanel {
   /** Recompute matches (model, layout or filter changed) and re-render the box, list and popover. */
   refresh() {
     const issues = this.c.issues();
-    const fc = this.c.filterCtx();
+    const fc = this.filterCtx();
     const found = this.active ? issues.filter((i) => matchesFilter(i, this.filter, fc)) : [];
     const current = this.matches[this.index]?.key;
-    this.matches = sortMatches(found, this.sort, { stage: this.c.stageOf, position: this.c.position });
+    this.matches = sortMatches(found, this.sort, { stage: this.c.stageOf, position: this.c.position, distance: (k) => this.reach?.get(k) });
     this.matchSet.clear();
     for (const m of this.matches) this.matchSet.add(m.key);
     // Keep the current item across refreshes; follow the selection when it is a match.
@@ -97,6 +101,21 @@ export class FilterPanel {
     this.renderBox();
     this.renderList();
     if (this.pop.classList.contains('open')) this.renderPop();
+  }
+
+  /** Filter context including the anchor's reach (recomputed from the current model). */
+  private filterCtx(): FilterContext {
+    const a = this.filter.anchor;
+    this.reach = a?.keys.length ? reachable(this.c.issues(), this.c.links(), a) : undefined;
+    return { ...this.c.filterCtx(), reach: this.reach };
+  }
+
+  /** "Related to ticket": set the anchor (keeps the other options), open the list, sort by distance. */
+  setAnchor(key: string) {
+    this.filter = { ...this.filter, anchor: { ...DEFAULT_ANCHOR, ...(this.filter.anchor ?? {}), keys: [key] } };
+    this.sort = 'distance';
+    this.hidden = false;
+    this.commit();
   }
 
   /** Selection changed elsewhere (click on the graph): make it the current item when it matches. */
@@ -126,7 +145,7 @@ export class FilterPanel {
 
   clear() {
     const hideWas = this.filter.mode === 'hide';
-    this.filter = { ...EMPTY_FILTER, mode: this.filter.mode };
+    this.filter = { ...EMPTY_FILTER, mode: this.filter.mode, anchor: undefined };
     this.input.value = '';
     this.commit(hideWas);
   }
@@ -202,6 +221,11 @@ export class FilterPanel {
         this.commit();
         return;
       }
+      const an = (e.target as Element).closest<HTMLElement>('[data-anchor]');
+      if (an) {
+        this.onAnchor(an);
+        return;
+      }
       const mode = (e.target as Element).closest<HTMLElement>('[data-mode]');
       if (mode) {
         this.filter = { ...this.filter, mode: mode.dataset.mode as FilterState['mode'] };
@@ -209,6 +233,28 @@ export class FilterPanel {
         return;
       }
       if ((e.target as Element).closest('[data-clear]')) this.clear();
+    });
+    this.pop.addEventListener('change', (e) => {
+      const t = e.target as HTMLInputElement;
+      if (t.dataset.anchorKey !== undefined) {
+        const key = t.value.trim().toUpperCase();
+        if (!key) return this.patchAnchor(undefined);
+        if (!this.c.issues().some((i) => i.key === key)) {
+          t.setCustomValidity('Not in this graph');
+          t.reportValidity();
+          return;
+        }
+        t.setCustomValidity('');
+        this.setAnchor(key);
+      }
+      if (t.dataset.anchorSubtree !== undefined) this.patchAnchor({ subtree: t.checked });
+    });
+    this.pop.addEventListener('keydown', (e) => {
+      const t = e.target as HTMLInputElement;
+      if (t.dataset.anchorKey !== undefined && e.key === 'Enter') {
+        e.preventDefault();
+        t.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     });
     document.addEventListener('click', (e) => {
       if (!this.pop.contains(e.target as Node) && !this.box.contains(e.target as Node)) this.closePopover();
@@ -314,6 +360,36 @@ export class FilterPanel {
     window.addEventListener('resize', () => this.applyWidth());
   }
 
+  private patchAnchor(p: Partial<AnchorFilter> | undefined) {
+    if (!p) {
+      this.filter = { ...this.filter, anchor: undefined };
+      if (this.sort === 'distance') this.sort = 'graph';
+    } else {
+      if (!this.filter.anchor) return;
+      this.filter = { ...this.filter, anchor: { ...this.filter.anchor, ...p } };
+    }
+    this.commit();
+  }
+
+  private onAnchor(b: HTMLElement) {
+    const a = this.filter.anchor;
+    const kind = b.dataset.anchor;
+    if (kind === 'selected') {
+      const sel = this.c.selected();
+      if (sel) this.setAnchor(sel);
+      return;
+    }
+    if (kind === 'clear') return this.patchAnchor(undefined);
+    if (!a) return;
+    if (kind === 'depth') this.patchAnchor({ depth: Number(b.dataset.v) });
+    if (kind === 'dir') this.patchAnchor({ direction: b.dataset.v as AnchorFilter['direction'] });
+    if (kind === 'via') {
+      const v = b.dataset.v!;
+      const via = a.via.includes(v) ? a.via.filter((x) => x !== v) : [...a.via, v];
+      if (via.length) this.patchAnchor({ via });
+    }
+  }
+
   private goTo(i: number) {
     if (!this.matches[i]) return;
     this.index = i;
@@ -376,6 +452,7 @@ export class FilterPanel {
         ${t.icon}<b class="rr-key">${esc(i.key)}</b>
         <span class="rr-status st-${st}" title="${esc(`${i.status} · ${STAGE_LABELS[st]}`)}"><i></i>${esc(i.status)}</span>
         <span class="rr-sum" title="${esc(i.summary)}">${esc(i.summary)}</span>
+        ${this.reach ? `<span class="rr-hop${this.reach.get(i.key) === 0 ? ' anchor' : ''}" title="${this.reach.get(i.key) === 0 ? 'The anchor ticket' : `${this.reach.get(i.key)} hop${this.reach.get(i.key) === 1 ? '' : 's'} from ${esc(this.filter.anchor!.keys.join(', '))}`}">${this.reach.get(i.key) === 0 ? '◎' : this.reach.get(i.key)}</span>` : ''}
         ${drawn ? '' : `<span class="rr-off" title="Not in the current view (collapsed, filtered or hidden) — selecting reveals it">${UI_ICONS.hide}</span>`}
         ${i.assignee ? `<span class="rr-av" style="background:${this.c.avatarColor(i.assignee)}" title="${esc(i.assignee)}">${esc(this.c.initials(i.assignee))}</span>` : '<span class="rr-av none" title="Unassigned"></span>'}
         <button class="rr-info" data-rdetails="${esc(i.key)}" title="Details (Enter)" aria-label="Details">${UI_ICONS.info}</button>
@@ -392,7 +469,7 @@ export class FilterPanel {
       </header>
       <div class="rl-bar">
         <label>Sort <select data-rl="sort" title="Order of the list and of stepping">
-          ${sortOpt('graph', 'Graph order')}${sortOpt('key', 'Key')}${sortOpt('stage', 'Stage')}${sortOpt('updated', 'Recently updated')}${sortOpt('priority', 'Priority')}
+          ${sortOpt('graph', 'Graph order')}${this.filter.anchor?.keys.length ? sortOpt('distance', 'Distance') : ''}${sortOpt('key', 'Key')}${sortOpt('stage', 'Stage')}${sortOpt('updated', 'Recently updated')}${sortOpt('priority', 'Priority')}
         </select></label>
         <span class="rl-spacer"></span>
         <button class="rl-clear" data-rl="clear" title="Clear the filter">Clear filter</button>
@@ -412,7 +489,8 @@ export class FilterPanel {
   }
 
   private renderPop() {
-    const fc = this.c.filterCtx();
+    // Same context as matching (includes the anchor's reach), so chip counts stay within it.
+    const fc = this.filterCtx();
     const opts = facetOptions(this.c.issues(), this.filter, fc);
     const on = (facet: FacetKey, v: string) => (this.filter[facet] as string[]).includes(v);
     const chip = (facet: FacetKey, o: { value: string; label: string; count: number }, lead = '', tip = '') =>
@@ -432,6 +510,32 @@ export class FilterPanel {
     const labels = opts.labels.map((o) => chip('labels', o)).join('');
     const flags = opts.flags.map((o) => chip('flags', o, '', FLAG_LABELS[o.value as FlagId][1])).join('');
     const mode = this.filter.mode;
+    const a = this.filter.anchor;
+    const allKeys = this.c.issues().map((i) => i.key);
+    const viaLabels: Record<string, string> = { hierarchy: 'Parent / child', blocks: 'Blocks', relates: 'Relates', duplicates: 'Duplicates', clones: 'Clones', other: 'Other' };
+    const reachN = this.reach?.size ?? 0;
+    const anchorSec = `<div class="fsec fanchor"><h6>Related to ticket${a?.keys.length ? ' <span class="fsel">1</span>' : ''}</h6>
+      <div class="fa-row">
+        <input list="fa-keys" data-anchor-key value="${esc(a?.keys[0] ?? '')}" placeholder="Ticket key, e.g. ${esc(allKeys[0] ?? 'ABC-1')}" spellcheck="false" aria-label="Anchor ticket" />
+        <datalist id="fa-keys">${allKeys.slice(0, 400).map((k) => `<option value="${esc(k)}"></option>`).join('')}</datalist>
+        <button class="fchip" data-anchor="selected" ${this.c.selected() ? '' : 'disabled'} title="Use the selected ticket">Use selected</button>
+        ${a?.keys.length ? `<button class="rl-clear" data-anchor="clear">Clear</button>` : ''}
+      </div>
+      ${a?.keys.length ? `
+      <div class="fa-row"><span class="fa-label">Depth</span>
+        <div class="seg small">${[1, 2, 3, 4, 5, 0].map((d) => `<button data-anchor="depth" data-v="${d}" class="${a.depth === d ? 'on' : ''}" title="${d ? `${d} hop${d === 1 ? '' : 's'}` : 'Unlimited'}">${d || '∞'}</button>`).join('')}</div>
+        <span class="fa-meta">${reachN} ticket${reachN === 1 ? '' : 's'}</span>
+      </div>
+      <div class="fa-row"><span class="fa-label">Direction</span>
+        <div class="seg small">
+          <button data-anchor="dir" data-v="both" class="${a.direction === 'both' ? 'on' : ''}" title="Prerequisites and subsequent work">Both</button>
+          <button data-anchor="dir" data-v="up" class="${a.direction === 'up' ? 'on' : ''}" title="What it depends on: its blockers and parents">⬆ Prerequisites</button>
+          <button data-anchor="dir" data-v="down" class="${a.direction === 'down' ? 'on' : ''}" title="What follows from it: what it blocks and its children">⬇ Subsequent</button>
+        </div>
+      </div>
+      <div class="fa-row"><span class="fa-label">Via</span><div class="fchips">${ANCHOR_VIA.map((v) => `<button class="fchip${a.via.includes(v) ? ' on' : ''}" data-anchor="via" data-v="${v}" aria-pressed="${a.via.includes(v)}">${viaLabels[v]}</button>`).join('')}</div></div>
+      <label class="fa-check"><input type="checkbox" data-anchor-subtree ${a.subtree ? 'checked' : ''}/> Include sub-tasks and children of every ticket reached</label>` : '<div class="fa-hint">Pick a ticket to show what it depends on and what follows from it, a set number of hops away.</div>'}
+    </div>`;
     this.pop.innerHTML = `
       <div class="fpop-head">
         <span>Filter</span>
@@ -443,6 +547,7 @@ export class FilterPanel {
         <button class="rl-clear" data-clear="1" ${activeCount(this.filter) ? '' : 'disabled'}>Clear all</button>
       </div>
       <div class="fpop-body">
+        ${anchorSec}
         ${section('Stage', 'stages', stages)}
         ${section('Type', 'types', types)}
         ${section('Status', 'statuses', statuses, true)}

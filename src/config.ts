@@ -42,6 +42,15 @@ export function defaultScope(): ScopeConfig {
   };
 }
 
+export function cacheOptions(): { enabled: boolean; maxAgeMs: number; maxBytes: number } {
+  const c = cfg();
+  return {
+    enabled: c.get<boolean>('cache.enabled', true),
+    maxAgeMs: Math.max(1, c.get<number>('cache.maxAgeDays', 14)) * 86_400_000,
+    maxBytes: Math.max(1, c.get<number>('cache.maxSizeMB', 50)) * 1024 * 1024,
+  };
+}
+
 export function syncTiming(): SyncTiming & { enabled: boolean } {
   const c = cfg();
   const s = (k: string, d: number) => Math.max(0, c.get<number>(`sync.${k}`, d)) * 1000;

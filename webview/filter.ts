@@ -1,12 +1,29 @@
-import type { GraphIssue } from '../src/shared/model';
+import type { GraphIssue, GraphLink } from '../src/shared/model';
 import type { Stage } from '../src/shared/stages';
 
 // Ticket filter: free text + facets. Within a facet values are OR-ed, across facets AND-ed.
 
 export type FlagId = 'blocked' | 'blocking' | 'critical' | 'overdue' | 'stub' | 'hasChildren' | 'changed';
 
+/** "Related to ticket": what can be reached from the anchor ticket(s) within `depth` hops. */
+export interface AnchorFilter {
+  keys: string[];
+  /** Hops; 0 = unlimited. */
+  depth: number;
+  /** For directed links (blocks, duplicates, clones, other) and hierarchy: up = prerequisites / parents, down = subsequent / children. */
+  direction: 'both' | 'up' | 'down';
+  /** Relation kinds to follow: 'hierarchy' and link categories. */
+  via: string[];
+  /** Also include every descendant (sub-tasks, children) of each reached ticket. */
+  subtree: boolean;
+}
+
+export const ANCHOR_VIA = ['hierarchy', 'blocks', 'relates', 'duplicates', 'clones', 'other'] as const;
+export const DEFAULT_ANCHOR: Omit<AnchorFilter, 'keys'> = { depth: 2, direction: 'both', via: [...ANCHOR_VIA], subtree: false };
+
 export interface FilterState {
   text: string;
+  anchor?: AnchorFilter;
   stages: Stage[];
   types: string[];
   statuses: string[];
@@ -45,11 +62,13 @@ export interface FilterContext {
   blocking: (key: string) => boolean;
   critical: (key: string) => boolean;
   hasChildren: (key: string) => boolean;
+  /** Reach of the anchor filter: key → hops from the nearest anchor (see `reachable`). */
+  reach?: Map<string, number>;
   now?: number;
 }
 
 export function activeCount(f: FilterState): number {
-  return (f.text.trim() ? 1 : 0) + f.stages.length + f.types.length + f.statuses.length + f.assignees.length + f.priorities.length + f.sprints.length + f.labels.length + f.flags.length;
+  return (f.text.trim() ? 1 : 0) + (f.anchor?.keys.length ? 1 : 0) + f.stages.length + f.types.length + f.statuses.length + f.assignees.length + f.priorities.length + f.sprints.length + f.labels.length + f.flags.length;
 }
 
 export function facetCount(f: FilterState): number {
@@ -79,6 +98,7 @@ function sprintValues(i: GraphIssue): string[] {
 }
 
 export function matchesFilter(i: GraphIssue, f: FilterState, c: FilterContext, skip?: FacetKey): boolean {
+  if (f.anchor?.keys.length && c.reach && !c.reach.has(i.key)) return false;
   const any = <T>(facet: FacetKey, sel: T[], has: (v: T) => boolean) => facet === skip || !sel.length || sel.some(has);
   if (!any('stages', f.stages, (s) => c.stage(i) === s)) return false;
   if (!any('types', f.types, (t) => c.typeKey(i) === t)) return false;
@@ -134,14 +154,61 @@ export function facetOptions(issues: GraphIssue[], f: FilterState, c: FilterCont
   };
 }
 
-export type SortKey = 'graph' | 'key' | 'stage' | 'updated' | 'priority';
+/**
+ * Breadth-first reach from the anchor ticket(s) over the chosen relation kinds.
+ * Directed kinds follow `direction`: up = towards what blocks / is the parent of it, down = what it
+ * blocks / its children. "relates" has no direction and is always followed both ways.
+ * With `subtree`, every descendant of each reached ticket is added (at its ancestor's distance + 1).
+ */
+export function reachable(issues: GraphIssue[], links: GraphLink[], a: AnchorFilter): Map<string, number> {
+  const byKey = new Map(issues.map((i) => [i.key, i]));
+  const children = new Map<string, string[]>();
+  for (const i of issues) if (i.parentKey && byKey.has(i.parentKey)) children.set(i.parentKey, [...(children.get(i.parentKey) ?? []), i.key]);
+  const up = a.direction !== 'down';
+  const down = a.direction !== 'up';
+  const via = new Set(a.via);
+  const next = (k: string): string[] => {
+    const out: string[] = [];
+    if (via.has('hierarchy')) {
+      const p = byKey.get(k)?.parentKey;
+      if (up && p && byKey.has(p)) out.push(p);
+      if (down) out.push(...(children.get(k) ?? []));
+    }
+    for (const l of links) {
+      if (!via.has(l.category)) continue;
+      const undirected = l.category === 'relates';
+      if (l.from === k && (down || undirected)) out.push(l.to);
+      if (l.to === k && (up || undirected)) out.push(l.from);
+    }
+    return out;
+  };
+  const dist = new Map<string, number>();
+  let frontier = a.keys.filter((k) => byKey.has(k));
+  frontier.forEach((k) => dist.set(k, 0));
+  const limit = a.depth > 0 ? a.depth : Infinity;
+  for (let d = 1; d <= limit && frontier.length; d++) {
+    const nxt: string[] = [];
+    for (const k of frontier) for (const n of next(k)) if (!dist.has(n) && byKey.has(n)) dist.set(n, d), nxt.push(n);
+    frontier = nxt;
+  }
+  if (a.subtree) {
+    const stack = [...dist.keys()];
+    while (stack.length) {
+      const k = stack.pop()!;
+      for (const c of children.get(k) ?? []) if (!dist.has(c)) dist.set(c, dist.get(k)! + 1), stack.push(c);
+    }
+  }
+  return dist;
+}
+
+export type SortKey = 'graph' | 'distance' | 'key' | 'stage' | 'updated' | 'priority';
 
 const PRIORITY_RANK = ['highest', 'blocker', 'critical', 'high', 'major', 'medium', 'low', 'minor', 'lowest', 'trivial'];
 
 export function sortMatches(
   list: GraphIssue[],
   by: SortKey,
-  c: { stage: (i: GraphIssue) => Stage; position: (key: string) => { x: number; y: number } | undefined },
+  c: { stage: (i: GraphIssue) => Stage; position: (key: string) => { x: number; y: number } | undefined; distance?: (key: string) => number | undefined },
 ): GraphIssue[] {
   const keyCmp = (a: GraphIssue, b: GraphIssue) => a.key.localeCompare(b.key, undefined, { numeric: true });
   const stageOrder: Stage[] = ['todo', 'dev', 'test', 'done'];
@@ -154,6 +221,7 @@ export function sortMatches(
       if (!pa || !pb) return (pa ? -1 : pb ? 1 : 0) || keyCmp(a, b);
       return Math.round(pa.y / 40) - Math.round(pb.y / 40) || pa.x - pb.x;
     },
+    distance: (a, b) => (c.distance?.(a.key) ?? Infinity) - (c.distance?.(b.key) ?? Infinity) || keyCmp(a, b),
     key: keyCmp,
     stage: (a, b) => stageOrder.indexOf(c.stage(a)) - stageOrder.indexOf(c.stage(b)) || keyCmp(a, b),
     updated: (a, b) => (Date.parse(b.updated ?? '') || 0) - (Date.parse(a.updated ?? '') || 0) || keyCmp(a, b),

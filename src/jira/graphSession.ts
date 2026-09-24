@@ -20,6 +20,24 @@ export interface SessionOptions {
   indexLimit?: number;
 }
 
+/** Everything needed to rebuild a session without Jira (see GraphCache). Raw issues are kept as fetched. */
+export interface SessionSnapshot {
+  raw: RawIssue[];
+  roots: string[];
+  childrenQueried: string[];
+  query: { loaded: number; more: boolean; total?: number };
+  skipped: string[];
+  childrenCut: boolean;
+  cursorMs: number;
+  tombstones: [string, number][];
+  index: RawIssue[];
+  indexMeta: { capped: boolean; total?: number };
+  inclusion: [string, IssueScope][];
+  requested: string[];
+  outside: RawIssue[];
+  scope?: ScopeConfig;
+}
+
 export interface SyncResult {
   changed: string[];
   added: string[];
@@ -98,6 +116,68 @@ export class GraphSession {
     if (s.kind === 'keys' && !s.title) return `Around ${s.keys.join(', ')}`;
     if (s.title) return s.title;
     return s.kind === 'jql' ? s.jql : s.keys.join(', ');
+  }
+
+  /** Identity + options that decide what a snapshot contains; a different value means it cannot be reused. */
+  cacheKey(): { key: string; fingerprint: unknown } | undefined {
+    const s = this.source;
+    if (s.kind === 'demo' || (s.kind === 'keys' && s.demo)) return undefined;
+    const ident = s.kind === 'jql' ? { jql: s.jql, scoped: !!s.scope?.enabled } : { keys: [...s.keys].sort() };
+    const o = this.opts;
+    return {
+      key: JSON.stringify({ base: this.issues.baseUrl, kind: s.kind, ...ident }),
+      fingerprint: {
+        fields: this.fields,
+        depth: o.depth, maxIssues: o.maxIssues, includeChildren: o.includeChildren,
+        epicLinkField: o.epicLinkField, storyPointsField: o.storyPointsField, sprintField: o.sprintField, indexLimit: o.indexLimit,
+      },
+    };
+  }
+
+  snapshot(): SessionSnapshot {
+    return {
+      raw: [...this.raw.values()],
+      roots: this.roots,
+      childrenQueried: [...this.childrenQueried],
+      query: this.query,
+      skipped: [...this.skipped],
+      childrenCut: this.childrenCut,
+      cursorMs: this.cursorMs,
+      tombstones: [...this.tombstones],
+      index: [...this.index.values()],
+      indexMeta: this.indexMeta,
+      inclusion: [...this.inclusion],
+      requested: [...this.requested],
+      outside: [...this.outside.values()],
+      scope: this.scoped,
+    };
+  }
+
+  /**
+   * Rebuild from a snapshot without any request. If the scope settings changed since it was taken,
+   * re-scope locally from the cached index. The caller then syncs from the cursor to catch up.
+   */
+  async restore(snap: SessionSnapshot, progress: Progress = () => {}, signal?: AbortSignal) {
+    this.raw = new Map(snap.raw.map((i) => [i.key, i]));
+    this.roots = snap.roots;
+    this.childrenQueried = new Set(snap.childrenQueried);
+    this.query = snap.query;
+    this.skipped = new Set(snap.skipped);
+    this.childrenCut = snap.childrenCut;
+    this.cursorMs = snap.cursorMs;
+    this.tombstones = new Map(snap.tombstones);
+    this.index = new Map(snap.index.map((i) => [i.key, i]));
+    this.indexMeta = snap.indexMeta;
+    this.inclusion = new Map(snap.inclusion);
+    this.requested = new Set(snap.requested);
+    this.outside = new Map(snap.outside.map((i) => [i.key, i]));
+    // Force the deletion / move check on the first sync after a restore.
+    this.lastPresenceAt = 0;
+    const cfg = this.scoped;
+    if (cfg && this.index.size) {
+      if (JSON.stringify(cfg) !== JSON.stringify(snap.scope)) await this.applyScope(progress, signal);
+      else this.selection = select([...this.index.values()], cfg, { sprintField: this.opts.sprintField, epicLinkField: this.opts.epicLinkField });
+    }
   }
 
   private get scoped(): ScopeConfig | undefined {

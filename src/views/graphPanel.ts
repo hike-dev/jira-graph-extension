@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { sessionOptions, syncTiming, viewOptions } from '../config';
 import { JiraError } from '../jira/client';
-import { GraphSession, SyncResult } from '../jira/graphSession';
+import { fingerprint, GraphCache } from '../jira/cache';
+import { GraphSession, SessionSnapshot, SyncResult } from '../jira/graphSession';
 import { SyncScheduler } from '../sync/scheduler';
 import { IssueSource } from '../jira/types';
 import { toMermaid } from '../mermaid';
@@ -11,6 +12,8 @@ export interface PanelContext {
   extensionUri: vscode.Uri;
   /** Resolves the issue source for a graph; undefined when Jira is not configured. */
   resolveSource(source: GraphSource): Promise<IssueSource | undefined>;
+  /** Disk cache, or undefined when disabled (jiraGraph.cache.enabled). */
+  cache(): GraphCache | undefined;
 }
 
 interface PersistedState {
@@ -57,7 +60,7 @@ export class GraphPanel {
       localResourceRoots: [vscode.Uri.joinPath(ctx.extensionUri, 'dist'), vscode.Uri.joinPath(ctx.extensionUri, 'media')],
     });
     const p = new GraphPanel(panel, ctx, source, issues);
-    void p.reload();
+    void p.start();
     return p;
   }
 
@@ -69,7 +72,7 @@ export class GraphPanel {
       return;
     }
     const p = new GraphPanel(webview, ctx, source, issues);
-    void p.reload();
+    void p.start();
   }
 
   private constructor(
@@ -161,8 +164,9 @@ export class GraphPanel {
         const diff = { changed: r.changed, added: r.added, removed: r.removed, renamed: r.renamed };
         this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'sync', diff });
         GraphPanel.modelEmitter.fire(this);
-      } else if (before !== this.model) {
-        // A full reload happened meanwhile; nothing to report.
+        this.scheduleSave(true);
+      } else if (before === this.model) {
+        this.scheduleSave(false); // only the cursor moved
       }
     } catch (e) {
       this.syncErrors++;
@@ -188,6 +192,10 @@ export class GraphPanel {
 
   private dispose() {
     this.abort?.abort();
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      void this.saveNow();
+    }
     this.scheduler?.dispose();
     GraphPanel.panels.delete(this);
     if (GraphPanel._active === this) {
@@ -211,8 +219,67 @@ export class GraphPanel {
     this.post({ type: 'focus', key });
   }
 
+  /** Full load from Jira (the Reload button); the cache is refreshed afterwards. */
   reload(): Promise<void> {
     return this.run((progress, signal) => this.session!.load(progress, signal), 'init');
+  }
+
+  /** Open: from the disk cache when a usable snapshot exists (instant), then catch up; otherwise a full load. */
+  async start(): Promise<void> {
+    if (await this.openFromCache()) return;
+    await this.reload();
+  }
+
+  // ── Disk cache ────────────────────────────────────────────────────────────
+  private saveTimer: NodeJS.Timeout | undefined;
+  private lastSavedAt = 0;
+
+  private cacheId(): { cache: GraphCache; key: string; fp: string } | undefined {
+    const cache = this.ctx.cache();
+    const id = this.session?.cacheKey();
+    return cache && id ? { cache, key: id.key, fp: fingerprint(id.fingerprint) } : undefined;
+  }
+
+  private async openFromCache(): Promise<boolean> {
+    const id = this.cacheId();
+    if (!id) return false;
+    const hit = await id.cache.load<SessionSnapshot>(id.key, id.fp);
+    if (!hit) return false;
+    try {
+      await this.session!.restore(hit.data);
+      this.model = this.session!.toModel();
+    } catch {
+      await id.cache.delete(id.key); // unusable snapshot: forget it, load cold
+      return false;
+    }
+    this.lastSavedAt = hit.savedAt;
+    this.lastSyncAt = hit.savedAt;
+    this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'init', cachedAt: hit.savedAt });
+    GraphPanel.modelEmitter.fire(this);
+    // Catch up now: delta from the saved cursor plus the deletion / move check.
+    this.forcePresence = true;
+    void this.syncOnce();
+    return true;
+  }
+
+  /** Debounced snapshot write. `soon` for real changes; otherwise at most every 10 minutes (cursor only). */
+  private scheduleSave(soon: boolean) {
+    if (!this.cacheId() || !this.model) return;
+    if (!soon && Date.now() - this.lastSavedAt < 10 * 60_000) return;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => void this.saveNow(), soon ? 1500 : 0);
+  }
+
+  private async saveNow() {
+    this.saveTimer = undefined;
+    const id = this.cacheId();
+    if (!id || !this.session) return;
+    try {
+      await id.cache.save(id.key, id.fp, this.session.snapshot());
+      this.lastSavedAt = Date.now();
+    } catch {
+      // Disk full / read-only: the cache is optional.
+    }
   }
 
   expand(keys: string[]): Promise<void> {
@@ -230,6 +297,7 @@ export class GraphPanel {
       this.post({ type: 'graph', model: this.model, options: viewOptions(), reason });
       GraphPanel.modelEmitter.fire(this);
       this.lastSyncAt = Date.now();
+      this.scheduleSave(true);
     } catch (e) {
       if (abort.signal.aborted) return;
       const msg = (e as Error).message;

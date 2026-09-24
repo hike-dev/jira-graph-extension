@@ -71,6 +71,12 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Filter** (toolbar; <kbd>/</kbd> to focus):
   - **Text** matches key, title, assignee, status, type, labels and sprint.
   - **Filter options** (funnel, with a count badge) add chips for stage, type, status, assignee, priority, sprint (incl. backlog), labels and flags (blocked, blocking, critical block, overdue, not loaded, has children, changed in the last 24 h). Values in a group are OR-ed, groups AND-ed, and every chip shows how many tickets it would match.
+  - **Related to ticket** (top of the options, or right-click → *Filter to its relations…*): tickets reachable from an anchor ticket.
+    - *Depth:* 1–5 hops or ∞.
+    - *Direction:* both / ⬆ prerequisites (blockers, parents) / ⬇ subsequent (what it blocks, children); *relates* is always followed both ways.
+    - *Via:* the relation kinds to follow (parent/child, blocks, relates, duplicates, clones, other).
+    - Optionally *include sub-tasks and children* of every ticket reached.
+    - Results show their hop distance and sort by *Distance*; the other chips combine with it and count within it.
   - **Modes:** *Dim others*, or *Show only matches* (their parents stay as context).
   - **Results list**, docked on the left: one line per match (type, key, stage dot and status, title, assignee, and a mark when it's outside the current view).
     - collapsible to its header, resizable by its edge (double-click resets), hideable;
@@ -185,6 +191,23 @@ Open graphs stay current without re-fetching everything.
 - The toolbar *live* pill shows the state and the last sync; click it to sync now.
 - Try it offline: *Jira Graph: Simulate a Change in the Demo*.
 
+## Disk cache
+
+**Opening** a graph, including restoring it after a VS Code restart, shows the last cached state immediately (a toast says how old it is). The graph then catches up in the background: a delta query from the saved cursor, plus the deletion/move check. **Reload** always does a full load.
+
+- **Storage:**
+  - one JSON file per Jira site plus graph source, in VS Code's extension storage;
+  - tickets are kept exactly as Jira returned them, together with the sync cursor, the loaded set and the load-scope index;
+  - the token is never included.
+- **When it's written:** debounced after loads, expansions, scope changes and syncs that changed something; while nothing changes, at most every 10 minutes (just the moved cursor).
+- **Treated as a cache:** anything unusable means a normal full load. That covers:
+  - a missing, corrupt or older-format file;
+  - a changed field/option set (sprint field, limit, depth…);
+  - a snapshot older than `jiraGraph.cache.maxAgeDays` (14).
+
+  The cache is capped at `jiraGraph.cache.maxSizeMB` (50), dropping the least recently used graphs first. Demo graphs are never cached.
+- **Control:** *Jira Graph: Clear Cache*; `jiraGraph.cache.enabled: false` turns it off and deletes it.
+
 ## Settings
 
 | Setting | Default | Purpose |
@@ -196,6 +219,7 @@ Open graphs stay current without re-fetching everything.
 | `jiraGraph.storyPointsField` | – | Shown in the details drawer |
 | `jiraGraph.sprintField` | customfield_10020 | Sprint field used by the Planning lens |
 | `jiraGraph.hoverCard.delayMs` | 1000 | Hover time before the ticket card appears; `jiraGraph.hoverCard.enabled` turns it off |
+| `jiraGraph.cache.*` | enabled, maxAgeDays 14, maxSizeMB 50 | Disk cache, see *Disk cache* |
 | `jiraGraph.sync.*` | see *Live sync* | enabled, idleIntervalSeconds 60, activityDebounceSeconds 2, cooldownSeconds 180, cooldownIntervalSeconds 10, overlapSeconds 300, presenceCheckMinutes 10 |
 | `jiraGraph.layout.*` | DOWN / edges / ORTHOGONAL | Defaults for new graphs |
 | `jiraGraph.issueTypeStyles` | {} | `{ "Tech Debt": { "base": "task", "color": "#8B5CF6", "border": "dashed", "icon": "improvement" } }` |

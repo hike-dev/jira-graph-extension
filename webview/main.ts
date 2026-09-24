@@ -1186,6 +1186,7 @@ function issueActions(key: string): MenuItem[] {
     { label: i.loaded ? 'Load more relations' : 'Load issue & relations', icon: UI_ICONS.plus, hint: 'E', run: () => post({ type: 'expand', keys: [key] }) },
     'sep',
     { label: 'Focus neighbourhood', icon: UI_ICONS.focus, run: () => setFocus(key, focus?.hops ?? 2) },
+    { label: 'Filter to its relations…', icon: UI_ICONS.funnel, run: () => filterPanel.setAnchor(key) },
     { label: 'New graph from here', icon: UI_ICONS.graph, run: () => post({ type: 'graphFrom', key }) },
   ];
   if (kids) items.push({ label: collapsed.has(key) ? `Expand ${kids} children` : `Collapse ${kids} children`, icon: collapsed.has(key) ? UI_ICONS.expand : UI_ICONS.collapse, run: () => toggleCollapse(key) });
@@ -2042,7 +2043,7 @@ const interacting = () => !!pan || menu.classList.contains('open') || Date.now()
 function ago(t?: number): string {
   if (!t) return '—';
   const s = Math.round((Date.now() - t) / 1000);
-  return s < 5 ? 'now' : s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
+  return s < 5 ? 'now' : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86_400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86_400)}d ago`;
 }
 
 function renderLive() {
@@ -2211,6 +2212,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       model = m.model;
       persisted.source = m.model.source;
       styles = new TypeStyles(m.options.typeStyles);
+      if (m.cachedAt) toast(`Opened from cache (saved ${ago(m.cachedAt)}) — catching up with Jira…`);
       card.enabled = m.options.hover?.enabled ?? true;
       card.delayMs = m.options.hover?.delayMs ?? 1000;
       descriptionLines = m.options.hover?.descriptionLines ?? 4;
@@ -2257,6 +2259,7 @@ filterPanel = new FilterPanel(
     app,
     stage,
     issues: () => model?.issues ?? [],
+    links: () => model?.links ?? [],
     filterCtx: () => ({
       typeKey: (i) => styleOf(i).key,
       stage: stageOfIssue,

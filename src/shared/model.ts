@@ -139,7 +139,7 @@ export interface ViewOptions {
 }
 
 export type HostMessage =
-  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' | 'sync'; diff?: SyncDiff }
+  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' | 'sync'; diff?: SyncDiff; cachedAt?: number }
   | { type: 'syncState'; phase: 'paused' | 'idle' | 'cooldown' | 'off'; lastSyncAt?: number; nextRunAt?: number; syncing?: boolean; error?: string }
   | { type: 'loading'; message: string }
   | { type: 'error'; message: string }
