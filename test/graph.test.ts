@@ -340,3 +340,43 @@ test('workflow stages and blocking-link states (TMDXNC statuses)', async () => {
   assert.equal(blockState('dev', 'done'), 'stale');
   assert.equal(blockState('done', 'dev'), 'resolved');
 });
+
+test('filter: text + facets (OR within, AND across), flags, facet counts, sorting', async () => {
+  const f = await import('../webview/filter');
+  const { stageOf } = await import('../src/shared/stages');
+  const { model } = await demoModel();
+  const styles = new TypeStyles();
+  const blockedSet = new Set(['SHOP-21', 'SHOP-13']);
+  const ctx = {
+    typeKey: (i: (typeof model.issues)[number]) => styles.of(i).key,
+    stage: (i: (typeof model.issues)[number]) => stageOf(i),
+    blocked: (k: string) => blockedSet.has(k),
+    blocking: () => false,
+    critical: (k: string) => k === 'SHOP-13',
+    hasChildren: (k: string) => model.issues.some((i) => i.parentKey === k),
+  };
+  const run = (patch: Partial<import('../webview/filter').FilterState>) =>
+    model.issues.filter((i) => f.matchesFilter(i, { ...f.EMPTY_FILTER, ...patch }, ctx)).map((i) => i.key).sort();
+
+  assert.deepEqual(run({ text: 'pay' }), ['SHOP-20', 'SHOP-21', 'SHOP-24', 'PLAT-7'].sort(), 'text over summary');
+  assert.deepEqual(run({ text: 'marco' }).sort(), run({ assignees: ['Marco Rossi'] }).sort(), 'text also searches assignee');
+  const bugsOrSpikes = run({ types: ['bug', 'spike'] });
+  assert.ok(bugsOrSpikes.includes('SHOP-13') && bugsOrSpikes.includes('SHOP-23'), 'OR within a facet');
+  assert.deepEqual(run({ types: ['bug'], stages: ['done'] }), ['SHOP-25'], 'AND across facets');
+  assert.deepEqual(run({ flags: ['blocked'] }), ['SHOP-13', 'SHOP-21']);
+  assert.deepEqual(run({ flags: ['blocked', 'critical'] }), ['SHOP-13'], 'flags: all must hold');
+  assert.ok(run({ assignees: [f.NONE] }).includes('SHOP-12'), 'unassigned');
+  assert.ok(run({ sprints: [f.NONE] }).includes('SHOP-32'), 'backlog = no open sprint');
+  assert.equal(f.activeCount({ ...f.EMPTY_FILTER, text: 'x', types: ['bug'] }), 2);
+
+  // Facet counts ignore their own facet: choosing Bug must not zero the other types.
+  const opts = f.facetOptions(model.issues, { ...f.EMPTY_FILTER, types: ['bug'] }, ctx);
+  assert.ok(opts.types.find((o) => o.value === 'story')!.count > 0);
+  assert.equal(opts.stages.reduce((a, o) => a + o.count, 0), run({ types: ['bug'] }).length, 'stage counts within bugs');
+
+  const pos = new Map([['A-1', { x: 500, y: 0 }], ['A-2', { x: 0, y: 10 }], ['A-3', { x: 0, y: 300 }]]);
+  const items = ['A-3', 'A-1', 'A-2', 'A-4'].map((key) => ({ ...model.issues[0], key }));
+  const graphOrder = f.sortMatches(items, 'graph', { stage: (i) => stageOf(i), position: (k) => pos.get(k) }).map((i) => i.key);
+  assert.deepEqual(graphOrder, ['A-2', 'A-1', 'A-3', 'A-4'], 'reading order (same row left→right), hidden last');
+  assert.deepEqual(f.sortMatches(items, 'key', { stage: (i) => stageOf(i), position: () => undefined }).map((i) => i.key), ['A-1', 'A-2', 'A-3', 'A-4']);
+});

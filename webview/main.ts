@@ -8,6 +8,7 @@ import cssText from './styles.css';
 import { descriptionBlock, DescriptionState, fitDescription, HoverCard } from './hovercard';
 import { sanitizeDescription } from './sanitize';
 import { Tooltips } from './tooltip';
+import { FilterPanel, FilterPrefs } from './filterPanel';
 
 // Inline (same-origin) stylesheet: lets SVG export read the rules back via CSSOM.
 const styleEl = document.createElement('style');
@@ -40,6 +41,7 @@ interface UiState {
   lens?: LensId;
   strategy?: LayoutStrategy;
   drawerWidth?: number;
+  filterPrefs?: FilterPrefs;
 }
 interface Persisted {
   source?: GraphSource;
@@ -80,14 +82,12 @@ let focus: { key: string; hops: number } | undefined;
 let highlight: Set<string> | undefined;
 const hiddenKeys = new Set<string>();
 const collapsed = new Set<string>();
-let searchText = '';
-let matches: string[] = [];
-let matchIdx = -1;
 let blocked = new Set<string>();
 /** Worst still-blocking state per blocked ticket (colours its badge). */
 let blockedBy = new Map<string, BlockState>();
 /** Block state per visible link id (including aggregated links). */
 let linkStates = new Map<string, BlockState>();
+let blockingKeys = new Set<string>();
 let stageOverrides: Record<string, Stage> = {};
 const stageOfIssue = (i: GraphIssue): Stage => stageOf(i, stageOverrides);
 let cycleEdges = new Set<string>();
@@ -121,7 +121,15 @@ app.innerHTML = `
   <div class="title"><span class="title-text">Jira Graph</span><span class="stats"></span></div>
   <button class="live" data-action="syncNow" data-tip-fn="live" aria-label="Live sync"><span class="dot"></span><span class="live-text">live</span></button>
   <div class="spacer"></div>
-  <label class="search"><input type="search" placeholder="Search key, title, assignee, label…" spellcheck="false" data-tip="Search" data-kbd="/" data-tip-desc="Dims everything else. Enter jumps to the next match, Esc clears." /><span class="count"></span></label>
+  <div class="filterbox" role="search">
+    <span class="fb-icon">${UI_ICONS.search}</span>
+    <input type="search" placeholder="Filter tickets…" spellcheck="false" aria-label="Filter tickets" data-tip="Filter" data-kbd="/" data-tip-desc="Key, title, assignee, status, type, label or sprint. Enter / Shift+Enter step through matches, Esc clears, ↓ goes to the list." />
+    <button data-fb="facets" data-tip="Filter options" data-tip-desc="Stage, type, status, assignee, priority, sprint, labels, flags" aria-label="Filter options">${UI_ICONS.funnel}<span class="fb-badge" hidden></span></button>
+    <span class="fb-count" aria-live="polite"></span>
+    <button data-fb="prev" data-tip="Previous match" data-kbd="Shift+F3" aria-label="Previous match" disabled>${UI_ICONS.chevL}</button>
+    <button data-fb="next" data-tip="Next match" data-kbd="F3" aria-label="Next match" disabled>${UI_ICONS.chevR}</button>
+    <button data-fb="list" data-tip="Results list" data-tip-desc="Show or hide the list of matching tickets" aria-label="Results list">${UI_ICONS.list}</button>
+  </div>
   <div class="seg" data-opt="mode">
     <button data-v="edges" data-tip="Tree" data-tip-desc="Parent → child drawn as edges in a layered layout" aria-label="Tree layout">${UI_ICONS.tree}</button>
     <button data-v="nested" data-tip="Nested" data-tip-desc="Children drawn inside their parent: initiative ⊃ epic ⊃ story ⊃ sub-task" aria-label="Nested layout">${UI_ICONS.nested}</button>
@@ -196,7 +204,6 @@ const overlay = $<HTMLElement>('.overlay');
 const menu = $<HTMLElement>('.menu');
 const toastEl = $<HTMLElement>('.toast');
 const minimap = $<HTMLCanvasElement>('.minimap');
-const searchInput = $<HTMLInputElement>('.search input');
 const tips = new Tooltips(app);
 /** Sanitised descriptions by key; fetched on demand, dropped when the issue changes. */
 const descriptions = new Map<string, DescriptionState>();
@@ -378,10 +385,12 @@ function indexModel(m: GraphModel) {
   }
   blocked = new Set();
   blockedBy = new Map();
+  blockingKeys = new Set();
   for (const l of m.links) {
     const st = linkBlockState(l, byKey, stageOverrides);
     if (st && isBlocking(st)) {
       blocked.add(l.to);
+      blockingKeys.add(l.from);
       blockedBy.set(l.to, worse(blockedBy.get(l.to), st));
     }
   }
@@ -477,7 +486,16 @@ function computeVisible() {
       !hiddenKeys.has(i.key) &&
       !ui.hiddenTypes.includes(styleOf(i).key) &&
       !(ui.hideDone && i.statusCategory === 'done'));
-  const shown = new Set(model.issues.filter(pass).map((i) => i.key));
+  // Filter "show only matches": matches plus their ancestors (context), nothing else.
+  let only: Set<string> | undefined;
+  if (filterPanel?.active && filterPanel.filter.mode === 'hide') {
+    only = new Set();
+    for (const k of filterPanel.matchSet) {
+      only.add(k);
+      for (let p = byKey.get(k)?.parentKey; p && byKey.has(p) && !only.has(p); p = byKey.get(p)?.parentKey) only.add(p);
+    }
+  }
+  const shown = new Set(model.issues.filter((i) => pass(i) && (!only || only.has(i.key) || i.key === selected)).map((i) => i.key));
 
   // Collapsed ancestors swallow their descendants; links are re-attached to the ancestor.
   const rep = (k: string): string | undefined => {
@@ -545,11 +563,13 @@ async function relayout(opts: { fit?: boolean } = {}) {
   renderStats();
   if (opts.fit || firstLayout) fit(!firstLayout);
   firstLayout = false;
-  updateSearch(false);
+  filterPanel?.refresh();
   drawMinimap();
 }
 
 const nodeEls = new Map<string, SVGGElement>();
+// eslint-disable-next-line prefer-const -- assigned once the DOM and helpers exist (see init at the end)
+let filterPanel: FilterPanel;
 
 function render() {
   if (!lay || !model) return;
@@ -902,7 +922,7 @@ function applyClasses() {
     layers.edges.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl', 'chain'));
     layers.labels.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl'));
   }
-  const spot = highlight ?? (searchText ? new Set(matches) : undefined);
+  const spot = highlight ?? (filterPanel?.active ? filterPanel.matchSet : undefined);
   for (const [k, g] of nodeEls) {
     g.classList.toggle('selected', k === selected);
     g.classList.toggle('hl', related.has(k));
@@ -928,6 +948,7 @@ function closeDetails() {
 function select(key: string | undefined, opts: { center?: boolean; notify?: boolean } = {}) {
   if (key !== selected) drawerDescExpanded = false;
   if (!key) detailsOpen = false;
+  queueMicrotask(() => filterPanel?.syncSelection());
   selected = key;
   if (key && card.openKey === key) card.hide();
   applyClasses();
@@ -975,7 +996,9 @@ function fit(animated = true) {
   const { w, h } = stageSize();
   const pad = 32;
   // Keep the graph clear of the floating legend.
-  const left = ui.legendOpen && legend.offsetWidth ? legend.offsetWidth + 12 : 0;
+  const resultsW = stage.classList.contains('results-open') ? stage.querySelector<HTMLElement>('.results')?.offsetWidth ?? 0 : 0;
+  const legendW = ui.legendOpen && legend.offsetWidth ? legend.offsetWidth + 12 : 0;
+  const left = resultsW ? resultsW + legendW : legendW;
   const aw = w - left - pad * 2;
   const k = Math.max(0.08, Math.min(1.15, aw / Math.max(lay.width, 1), (h - pad * 2) / Math.max(lay.height, 1)));
   const target = { k, x: left + pad + (aw - lay.width * k) / 2, y: Math.max(pad, (h - lay.height * k) / 2) };
@@ -1502,7 +1525,7 @@ function renderLegend() {
       <h5>Status</h5>
       <div class="statuses"><span class="pill st-new" data-tip="To do" data-tip-desc="Status category “To Do”: grey stripe and pill">To do</span><span class="pill st-indeterminate" data-tip="In progress" data-tip-desc="Any in-progress status (In Progress, In Review, …): blue stripe and tint">In progress</span><span class="pill st-done" data-tip="Done" data-tip-desc="Status category “Done”: green stripe, key struck through">Done</span></div>
       <div class="badges"><span data-tip="Blocked" data-tip-desc="Red badge: an open ticket blocks this open ticket"><span class="badge-blocked"></span> blocked</span> <span data-tip="Not loaded" data-tip-desc="Hatched card: found through a relation; press + or double-click to load"><span class="badge-stub"></span> not loaded</span></div>
-      <p class="help">Click selects · <kbd>Enter</kbd> or ⓘ details · double-click opens Jira · right-click for actions · scroll / pinch to zoom · drag to pan · <kbd>L</kbd> lens · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
+      <p class="help">Click selects · <kbd>Enter</kbd> or ⓘ details · double-click opens Jira · right-click for actions · scroll / pinch to zoom · drag to pan · <kbd>L</kbd> lens · <kbd>/</kbd> filter · <kbd>F3</kbd> next match · <kbd>F</kbd> fit · arrows move selection</p>
     </div>`;
   legend.querySelector('.legend-head')!.addEventListener('click', () => {
     ui.legendOpen = !ui.legendOpen;
@@ -1599,45 +1622,12 @@ function renderStats() {
     stubs ? `${stubs} not loaded` : '',
     blocked.size ? `<span class="bad">${blocked.size} blocked</span>` : '',
   ].filter(Boolean).join(' · ');
+  const statsEl = $<HTMLElement>('.stats');
+  statsEl.setAttribute('data-tip', model.title);
+  statsEl.setAttribute('data-tip-desc', statsEl.textContent ?? '');
 }
 
 // ── Search ──────────────────────────────────────────────────────────────────
-function updateSearch(jump: boolean) {
-  searchText = searchInput.value.trim().toLowerCase();
-  if (!searchText || !model) {
-    matches = [];
-    $<HTMLElement>('.search .count').textContent = '';
-  } else {
-    const terms = searchText.split(/\s+/);
-    matches = visible.issues
-      .filter((i) => {
-        const hay = `${i.key} ${i.summary} ${i.assignee ?? ''} ${i.status} ${i.type} ${i.labels.join(' ')}`.toLowerCase();
-        return terms.every((t) => hay.includes(t));
-      })
-      .map((i) => i.key);
-    if (matchIdx >= matches.length) matchIdx = -1;
-    $<HTMLElement>('.search .count').textContent = matches.length ? `${matchIdx + 1 || '–'}/${matches.length}` : '0';
-    if (jump && matches.length) {
-      matchIdx = (matchIdx + 1) % matches.length;
-      $<HTMLElement>('.search .count').textContent = `${matchIdx + 1}/${matches.length}`;
-      select(matches[matchIdx], { center: true });
-    }
-  }
-  applyClasses();
-}
-
-searchInput.addEventListener('input', () => {
-  matchIdx = -1;
-  updateSearch(false);
-});
-searchInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') updateSearch(true);
-  if (e.key === 'Escape') {
-    searchInput.value = '';
-    updateSearch(false);
-    searchInput.blur();
-  }
-});
 
 // ── Minimap ─────────────────────────────────────────────────────────────────
 let mmScheduled = false;
@@ -1857,8 +1847,10 @@ document.addEventListener('keydown', (e) => {
   if ((e.target as Element | null)?.closest?.('input, select, textarea')) return;
   if (e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key === 'f')) {
     e.preventDefault();
-    searchInput.focus();
-    searchInput.select();
+    filterPanel.focusInput();
+  } else if (e.key === 'F3' || ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G'))) {
+    e.preventDefault();
+    filterPanel.step(e.shiftKey ? -1 : 1);
   } else if (e.key === 'f' || e.key === 'F') fit();
   else if (e.key === '+' || e.key === '=') zoomAt(1.2);
   else if (e.key === '-') zoomAt(1 / 1.2);
@@ -1993,7 +1985,7 @@ function noteActivity() {
   }
 }
 for (const ev of ['pointerdown', 'wheel', 'keydown'] as const) window.addEventListener(ev, noteActivity, { passive: true, capture: true });
-searchInput.addEventListener('input', noteActivity);
+app.querySelector('.filterbox input')!.addEventListener('input', noteActivity);
 
 const interacting = () => !!pan || menu.classList.contains('open') || Date.now() - lastInteraction < 1500;
 
@@ -2103,6 +2095,7 @@ function applySync(next: GraphModel, diff: SyncDiff) {
     renderStats();
     flashNodes(flash);
     card.refresh();
+    filterPanel?.refresh();
     return;
   }
   // Removed tickets fade out in place before the layout closes the gap.
@@ -2202,6 +2195,52 @@ window.addEventListener('resize', () => drawMinimap());
 
 syncToolbar();
 setDrawerWidth(ui.drawerWidth ?? DRAWER_DEFAULT);
+filterPanel = new FilterPanel(
+  {
+    app,
+    stage,
+    issues: () => model?.issues ?? [],
+    filterCtx: () => ({
+      typeKey: (i) => styleOf(i).key,
+      stage: stageOfIssue,
+      blocked: (k) => blocked.has(k),
+      blocking: (k) => blockingKeys.has(k),
+      critical: (k) => blockedBy.get(k) === 'critical',
+      hasChildren: (k) => childrenOf.has(k),
+    }),
+    position: (k) => {
+      const n = lay?.nodes.get(k);
+      return n ? { x: n.x, y: n.y } : undefined;
+    },
+    typeInfo: (i) => ({ label: styleOf(i).label, icon: iconMarkup(styleOf(i), 14) }),
+    typeInfoByKey: (typeKey) => {
+      const i = model?.issues.find((x) => styleOf(x).key === typeKey);
+      return i ? { label: styleOf(i).label, icon: iconMarkup(styleOf(i), 14) } : undefined;
+    },
+    stageOf: stageOfIssue,
+    avatarColor,
+    initials,
+    selected: () => selected,
+    navigate: (k) => revealKey(k),
+    details: (k) => {
+      revealKey(k);
+      openDetails(k);
+    },
+    hover: (k) => {
+      hovered = k;
+      applyClasses();
+    },
+    changed: (relayoutNeeded) => {
+      if (relayoutNeeded) void relayout();
+      else applyClasses();
+    },
+    save: (prefs) => {
+      ui.filterPrefs = prefs;
+      saveState();
+    },
+  },
+  ui.filterPrefs ?? {},
+);
 applyView();
 showLoading('Loading…');
 post({ type: 'ready' });

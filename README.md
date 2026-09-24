@@ -68,7 +68,20 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Prerequisite and unlock chains** (tech-tree style): selecting a ticket highlights everything it transitively needs (amber) and everything it transitively unblocks (cyan), with flowing edges. The drawer shows *requires N · M open · K steps deep* and *unlocks N*.
 - **Focus mode**: shows only the N-hop neighbourhood of an issue (1–3 hops).
 - **Filters.** Click legend entries to hide issue types or link types. You can also hide done issues, or hide single nodes.
-- **Search.** Matches key, title, assignee, status and labels, with Enter cycling through matches.
+- **Filter** (toolbar; <kbd>/</kbd> to focus):
+  - **Text** matches key, title, assignee, status, type, labels and sprint.
+  - **Filter options** (funnel, with a count badge) add chips for stage, type, status, assignee, priority, sprint (incl. backlog), labels and flags (blocked, blocking, critical block, overdue, not loaded, has children, changed in the last 24 h). Values in a group are OR-ed, groups AND-ed, and every chip shows how many tickets it would match.
+  - **Modes:** *Dim others*, or *Show only matches* (their parents stay as context).
+  - **Results list**, docked on the left: one line per match (type, key, stage dot and status, title, assignee, and a mark when it's outside the current view).
+    - collapsible to its header, resizable by its edge (double-click resets), hideable;
+    - sorted by graph order (reading order, so stepping follows the picture), key, stage, recently updated or priority.
+  - **Stepping** through matches, forwards or backwards:
+    - `‹ ›` in the toolbar or the list;
+    - <kbd>Enter</kbd> / <kbd>Shift+Enter</kbd> in the box;
+    - <kbd>F3</kbd> / <kbd>Shift+F3</kbd> or <kbd>Cmd/Ctrl+G</kbd> anywhere;
+    - <kbd>↑</kbd><kbd>↓</kbd> in the list.
+
+    Each step selects the ticket, reveals it if collapsed or filtered, and centres it. Clicking a ticket on the graph makes it the current item. Enter or ⓘ on a row opens its details. The filter and the list layout are remembered per graph.
 - **Minimap**, animated relayout, pan and zoom, and fit to screen.
 - **Ticket hover card** after hovering a ticket for 1 s (`jiraGraph.hoverCard.delayMs`, or turn it off with `jiraGraph.hoverCard.enabled`):
   - Shows the **description** (fetched on demand, cached until the ticket changes). It's collapsed to 4 lines (`jiraGraph.hoverCard.descriptionLines`) with *Show more*, and the details drawer shows it too. Descriptions come from Jira's rendered HTML and pass an allowlist: formatting, lists, code, quotes, tables and web links survive; images show as placeholders; scripts and other links are dropped.
@@ -80,7 +93,7 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Details drawer** (resizable: drag its left edge, double-click to reset, arrow keys when focused; width remembered): status, priority, assignee, labels, parent, children and relations grouped by type, with action buttons.
 - **Context menu**: open in Jira, load relations, focus, new graph from here, collapse, copy key or link, hide.
 - **Keyboard:**
-  - `/` search · `F` fit · `+`/`-`/`0` zoom · `L` / `Shift+L` cycle lens
+  - `/` filter · `F3` / `Shift+F3` next / previous match · `F` fit · `+`/`-`/`0` zoom · `L` / `Shift+L` cycle lens
   - arrows move the selection spatially
   - `Enter` details · `Cmd/Ctrl+Enter` Jira · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `Esc` clears
 - **Export:**
