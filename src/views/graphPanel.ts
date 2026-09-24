@@ -96,6 +96,7 @@ export class GraphPanel {
           if (this.model) this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'update' });
         }
         if (e.affectsConfiguration('jiraGraph.sync')) this.applySyncSettings();
+        if (e.affectsConfiguration('jiraGraph.maxIssues')) this.session?.setLimit(sessionOptions().maxIssues);
       }),
       vscode.window.onDidChangeWindowState((w) => this.scheduler?.setFocused(w.focused)),
       panel.onDidChangeViewState((e) => this.scheduler?.setVisible(e.webviewPanel.visible)),
@@ -255,6 +256,20 @@ export class GraphPanel {
       case 'syncNow':
         this.syncNow();
         break;
+      case 'setScope':
+        await this.run((progress, signal) => this.session!.setScope(m.scope, progress, signal), 'update');
+        break;
+      case 'loadMore':
+        await this.run((progress, signal) => this.session!.loadMore(m.parent, progress, signal), 'update');
+        break;
+      case 'raiseLimit': {
+        const to = Math.max(10, Math.min(2000, Math.round(m.to)));
+        const target = vscode.workspace.workspaceFolders ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+        await vscode.workspace.getConfiguration('jiraGraph').update('maxIssues', to, target);
+        this.session?.setLimit(to);
+        await this.reload();
+        break;
+      }
       case 'describe':
         await this.describe(m.key, m.reqId);
         break;

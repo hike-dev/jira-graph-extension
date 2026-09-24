@@ -104,6 +104,7 @@ kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border: 1px s
 .banner > span { display: inline-flex; align-items: center; gap: 6px; }
 .banner .warn { color: var(--vscode-editorWarning-foreground, #cca700); }
 .banner .warn span { color: var(--fg); }
+.banner .info { color: var(--muted); }
 .banner button { background: var(--btn2-bg); color: var(--btn2-fg); border: 0; border-radius: 3px; padding: 1px 8px; cursor: pointer; font-size: 11.5px; }
 .banner button.on { background: var(--btn-bg); color: var(--btn-fg); }
 
@@ -701,3 +702,45 @@ body.vscode-light .hc-chain .down { color: #00718a; }
 }
 .toolbar .title { overflow: hidden; }
 .toolbar .title .stats { overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Load scope ─────────────────────────────────────────────────────── */
+.toolbar button.scopebtn { gap: 5px; height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: 12px; font-size: 11.5px; color: var(--fg); max-width: 260px; }
+.toolbar button.scopebtn .scope-sum { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toolbar button.scopebtn .caret { color: var(--muted); font-size: 10px; }
+.toolbar button.scopebtn.on { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.scopepop { width: 400px; }
+.sc-off p { margin: 8px 0; color: var(--muted); line-height: 1.45; }
+.sc-row { display: flex; align-items: center; gap: 7px; margin-top: 11px; }
+.sc-row b { font-weight: 600; }
+.sc-meta { color: var(--muted); font-size: 11.5px; }
+.sc-count { font-variant-numeric: tabular-nums; font-weight: 600; }
+.sc-count em { font-style: normal; font-weight: 400; color: var(--muted); }
+.sc-always { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; }
+.sc-sub { display: flex; align-items: center; gap: 6px; margin: 5px 0 0 16px; font-size: 12px; color: var(--muted); }
+.sc-dot { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.sc-sprint { background: var(--st-accent-ind); }
+.sc-context { background: #a08ff0; }
+.sc-backlog { background: var(--st-accent-new); }
+.sc-done { background: var(--st-accent-done); }
+.sc-req { background: #f5a13a; }
+.sc-free { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.sc-slider { width: 100%; margin: 6px 0 2px; accent-color: var(--accent); }
+.sc-hint { font-size: 11px; color: var(--muted); line-height: 1.4; margin: 3px 0 0; }
+.sc-doneseg { margin-top: 6px; }
+.sc-budget { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 14px; gap: 1px; }
+.sc-budget i { display: block; min-width: 2px; }
+.sc-budget-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; }
+/* "+N" left-out chip on parents */
+.g-more { cursor: pointer; }
+.g-more rect { fill: var(--card); stroke: var(--st-accent-new); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.g-more text { font: 700 10.5px var(--font); fill: var(--muted); text-anchor: middle; }
+.g-more:hover rect { fill: color-mix(in srgb, var(--accent) 22%, var(--card)); stroke: var(--accent); stroke-dasharray: none; }
+.g-more:hover text { fill: var(--fg); }
+.canvas.far .g-more { display: none; }
+/* Hover card: why it is in the graph */
+.hc-why ul { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 11.5px; }
+.hc-tier { display: inline-block; padding: 0 7px; border-radius: 8px; font-size: 11px; font-weight: 600; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.hc-tier.t-sprint { background: color-mix(in srgb, var(--st-accent-ind) 22%, transparent); }
+.hc-tier.t-context { background: color-mix(in srgb, #a08ff0 22%, transparent); }
+.hc-tier.t-done { background: color-mix(in srgb, var(--st-accent-done) 22%, transparent); }
+.hc-tier.t-requested { background: color-mix(in srgb, #f5a13a 22%, transparent); }

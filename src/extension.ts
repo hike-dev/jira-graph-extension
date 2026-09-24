@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { chooseProject, configure, currentProject, getConnection, refreshConfiguredContext, scopeJql, SavedQuery, savedQueries, setSavedQueries, signOut } from './config';
+import { chooseProject, configure, currentProject, defaultScope, getConnection, refreshConfiguredContext, scopeJql, SavedQuery, savedQueries, setSavedQueries, signOut } from './config';
 import { JiraClient } from './jira/client';
 import { DemoSource } from './jira/demoSource';
 import { IssueSource } from './jira/types';
@@ -44,7 +44,7 @@ export function activate(context: vscode.ExtensionContext) {
     const panel = GraphPanel.active;
     issues.setModel(panel?.model);
     const m = panel?.model;
-    issuesView.message = m ? `${m.title}${m.truncated ? ' (truncated)' : ''}` : undefined;
+    issuesView.message = m ? `${m.title}${m.truncation?.queryMore ? ` (showing ${m.truncation.queryLoaded} of ${m.truncation.queryTotal ?? 'more'})` : ''}` : undefined;
     issuesView.description = m ? `${m.issues.length} issues` : undefined;
     if (m) {
       const blocked = blockedKeys(m).size;
@@ -79,10 +79,12 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // ── Commands ───────────────────────────────────────────────────────────────
-  const openJql = async (jql: string, title?: string) => {
+  const openJql = async (jql: string, title?: string, scoped = false) => {
     await queries.pushRecent(jql);
-    await GraphPanel.open(ctx, { kind: 'jql', jql, title });
+    await GraphPanel.open(ctx, { kind: 'jql', jql, title, scope: scoped ? defaultScope() : undefined });
   };
+  /** The project graph: whole project as the universe, sprint-first load scope. */
+  const openProjectScope = (key: string, name: string) => openJql(`project = ${key} ORDER BY updated DESC`, `${name} · Sprint scope`, true);
 
   const keyArg = (arg: unknown): string | undefined =>
     typeof arg === 'string' ? arg : issuesView.selection[0];
@@ -121,7 +123,7 @@ export function activate(context: vscode.ExtensionContext) {
       qp.hide();
       if (item?.switchProject) return void vscode.commands.executeCommand('jiraGraph.selectProject');
       const jql = item?.jql ?? scopeJql(qp.value.trim(), project);
-      if (jql) void openJql(jql, item?.jql && !item.label.startsWith('$(history)') ? `${project.name} · ${item.label.replace(/^\$\([^)]*\)\s*/, '')}` : undefined);
+      if (jql) void openJql(jql, item?.jql && !item.label.startsWith('$(history)') ? `${project.name} · ${item.label.replace(/^\$\([^)]*\)\s*/, '')}` : undefined, !!(item as { scoped?: boolean })?.scoped);
     });
     qp.show();
   });
@@ -137,6 +139,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const projectPresets = (key: string) => [
+    { label: '$(target) Sprint scope', description: 'active + future sprints, top backlog, recent done', jql: `project = ${key} ORDER BY updated DESC`, scoped: true },
     { label: '$(issues) Unresolved tickets', jql: `project = ${key} AND resolution = Unresolved ORDER BY created DESC` },
     { label: '$(list-flat) All tickets', description: 'capped at jiraGraph.maxIssues', jql: `project = ${key} ORDER BY created DESC` },
     { label: '$(zap) Epics and their children', jql: `project = ${key} AND issuetype = Epic ORDER BY created DESC` },
@@ -147,7 +150,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   register('jiraGraph.openProjectGraph', async () => {
     const project = await ensureProject();
-    if (project) await openJql(projectPresets(project.key)[0].jql, `${project.name} · Unresolved`);
+    if (project) await openProjectScope(project.key, project.name);
   });
 
   register('jiraGraph.selectProject', async () => {
@@ -155,7 +158,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (!conn) return configure(secrets);
     const project = await chooseProject(conn);
     queries.refresh();
-    if (project) await openJql(projectPresets(project.key)[0].jql, `${project.name} · Unresolved`);
+    if (project) await openProjectScope(project.key, project.name);
   });
 
   register('jiraGraph.openIssueGraph', async (arg?: unknown) => {

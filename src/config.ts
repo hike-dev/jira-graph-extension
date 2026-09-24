@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { Deployment, JiraClient, JiraConnection } from './jira/client';
 import { SessionOptions } from './jira/graphSession';
 import type { ProjectRef } from './shared/jql';
-import { TypeStyleOverride, ViewOptions } from './shared/model';
+import { ScopeConfig, TypeStyleOverride, ViewOptions } from './shared/model';
 import type { SyncTiming } from './sync/scheduler';
 
 const TOKEN_KEY = 'jiraGraph.token';
@@ -27,6 +27,18 @@ export function sessionOptions(): SessionOptions {
     sprintField: c.get<string>('sprintField', 'customfield_10020') || undefined,
     overlapMs: c.get<number>('sync.overlapSeconds', 300) * 1000,
     presenceIntervalMs: c.get<number>('sync.presenceCheckMinutes', 10) * 60_000,
+    indexLimit: c.get<number>('scope.indexLimit', 2000),
+  };
+}
+
+export function defaultScope(): ScopeConfig {
+  const c = cfg();
+  return {
+    enabled: true,
+    backlog: Math.max(0, c.get<number>('scope.backlog', 50)),
+    doneDays: c.get<number>('scope.doneDays', 14),
+    future: c.get<boolean>('scope.futureSprints', true),
+    context: true,
   };
 }
 

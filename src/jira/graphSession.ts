@@ -1,6 +1,7 @@
-import { GraphIssue, GraphLink, GraphModel, GraphSource, SprintRef, StatusCategory, linkCategory } from '../shared/model';
+import { GraphIssue, GraphLink, GraphModel, GraphSource, IssueScope, ScopeConfig, ScopeInfo, SprintRef, StatusCategory, Truncation, linkCategory } from '../shared/model';
+import { classify, select, Selection } from './scope';
 import { JiraError } from './client';
-import { IssueSource, RawIssue, RawIssueRef } from './types';
+import { IssueSource, RawIssue, RawIssueRef, SearchPage } from './types';
 
 export interface SessionOptions {
   /** How many rounds of "follow links / parents / children" to run after the initial query. */
@@ -15,6 +16,8 @@ export interface SessionOptions {
   overlapMs?: number;
   /** Sync: how often to check that loaded issues still exist (deleted / no access / moved). */
   presenceIntervalMs?: number;
+  /** Scoped graphs: most tickets indexed from the query's universe. */
+  indexLimit?: number;
 }
 
 export interface SyncResult {
@@ -37,6 +40,9 @@ const TOMBSTONE_MS = 24 * 3600_000;
 type Progress = (message: string) => void;
 
 const BATCH = 50;
+const INDEX_LIMIT = 2000;
+/** Upper bound for a keys-only children probe per batch of parents. */
+const CHILD_PROBE = 1000;
 
 /**
  * Holds the raw issues fetched for one graph and knows how to grow it
@@ -46,7 +52,22 @@ export class GraphSession {
   private raw = new Map<string, RawIssue>();
   private childrenQueried = new Set<string>();
   private roots: string[] = [];
-  private truncated = false;
+  /** What the limit really cut — only these make the graph "truncated". */
+  private query: { loaded: number; more: boolean; total?: number } = { loaded: 0, more: false };
+  private skipped = new Set<string>();
+  private childrenCut = false;
+
+  // ── Load scope (see scope.ts) ──
+  /** The query's universe with full fields; the scope picks from it locally. */
+  private index = new Map<string, RawIssue>();
+  private indexMeta: { capped: boolean; total?: number } = { capped: false };
+  private selection: Selection | undefined;
+  /** Why each loaded ticket is in the graph. */
+  private inclusion = new Map<string, IssueScope>();
+  /** Loaded on request ("Load more" / expand), kept across scope changes. */
+  private requested = new Set<string>();
+  /** Context tickets outside the universe (e.g. an epic in another project), kept so re-scoping needs no request. */
+  private outside = new Map<string, RawIssue>();
   /** Newest `updated` seen (epoch ms, server clock) — the sync cursor. */
   private cursorMs = 0;
   private lastPresenceAt = 0;
@@ -79,22 +100,148 @@ export class GraphSession {
     return s.kind === 'jql' ? s.jql : s.keys.join(', ');
   }
 
+  private get scoped(): ScopeConfig | undefined {
+    return this.source.kind === 'jql' && this.source.scope?.enabled ? this.source.scope : undefined;
+  }
+
+  /** Scoped graph: index the whole universe once, then choose locally (no refetch on scope changes). */
+  private async loadScoped(jql: string, progress: Progress, signal?: AbortSignal) {
+    progress('Indexing the query…');
+    const idx = await this.page(jql, this.opts.indexLimit ?? INDEX_LIMIT, signal);
+    this.index = new Map(idx.issues.map((i) => [i.key, i]));
+    this.indexMeta = { capped: idx.hasMore };
+    if (idx.hasMore && this.issues.count) {
+      try {
+        this.indexMeta.total = await this.issues.count(jql, signal);
+      } catch {
+        // Only for the message.
+      }
+    }
+    // Leaving tickets out is the scope's intent, not truncation.
+    this.query = { loaded: idx.issues.length, more: false };
+    await this.applyScope(progress, signal);
+    let m = 0;
+    for (const i of this.index.values()) m = Math.max(m, ms(i.fields.updated));
+    this.cursorMs = m;
+  }
+
+  /** Change the scope. With an index in hand this is local and fast; turning it off reloads the query as-is. */
+  async setScope(cfg: ScopeConfig, progress: Progress, signal?: AbortSignal) {
+    if (this.source.kind !== 'jql') return;
+    (this.source as { scope?: ScopeConfig }).scope = cfg;
+    if (cfg.enabled && this.index.size) await this.applyScope(progress, signal);
+    else await this.load(progress, signal);
+  }
+
+  /** Load every left-out child of a parent (the "+N more" chip). */
+  async loadMore(parent: string, progress: Progress, signal?: AbortSignal) {
+    const kids = [...this.index.values()].filter((i) => this.parentKeyOf(i) === parent && !this.raw.has(i.key));
+    progress(`Loading ${kids.length} more under ${parent}…`);
+    kids.forEach((i) => this.requested.add(i.key));
+    const added = this.add(kids);
+    for (const k of added) this.inclusion.set(k, { tier: 'requested', reasons: [`Loaded on request under ${parent}`] });
+    if (this.scoped?.context) await this.addContext(added, signal);
+  }
+
+  private async applyScope(progress: Progress, signal?: AbortSignal) {
+    const cfg = this.scoped!;
+    progress('Choosing tickets for the scope…');
+    const sel = select([...this.index.values()], cfg, { sprintField: this.opts.sprintField, epicLinkField: this.opts.epicLinkField });
+    this.selection = sel;
+    this.raw.clear();
+    this.inclusion.clear();
+    this.skipped.clear();
+    this.childrenCut = false;
+    const want = [...sel.keys, ...[...this.requested].filter((k) => this.index.has(k) && !sel.keys.includes(k))];
+    // In priority order, so a hard limit drops backlog before done before sprint work.
+    this.add(want.map((k) => this.index.get(k)!));
+    for (const k of this.raw.keys()) {
+      const c = sel.classified.get(k)!;
+      const tier = this.requested.has(k) && c.tier !== 'sprint' ? 'requested' : c.tier === 'oldDone' ? 'done' : c.tier;
+      this.inclusion.set(k, {
+        tier,
+        rank: sel.rank.get(k),
+        score: Number.isFinite(c.score) && c.tier === 'backlog' ? Math.round(c.score) : undefined,
+        reasons: tier === 'requested' ? ['Loaded on request'] : c.reasons.map((r) => (r.points ? `${r.label} (+${Math.round(r.points)})` : r.label)),
+      });
+    }
+    this.roots = [...this.raw.keys()].filter((k) => sel.classified.get(k)?.tier === 'sprint');
+    if (cfg.context) await this.addContext([...this.raw.keys()], signal);
+  }
+
+  /**
+   * Context for loaded tickets: their parent chain and directly linked tickets. Taken from the index
+   * when possible (no request), fetched otherwise (e.g. an epic in another project).
+   */
+  private async addContext(keys: string[], signal?: AbortSignal) {
+    const why = new Map<string, string>();
+    const linkNeed: string[] = [];
+    for (const k of keys) {
+      for (const l of this.raw.get(k)?.fields.issuelinks ?? []) {
+        const o = (l.outwardIssue ?? l.inwardIssue)!.key;
+        if (!this.raw.has(o) && !why.has(o)) {
+          why.set(o, `${l.outwardIssue ? l.type.inward : l.type.outward} ${k}`.replace(/^./, (c) => c.toUpperCase()));
+          linkNeed.push(o);
+        }
+      }
+    }
+    let frontier = keys;
+    const need = new Set(linkNeed);
+    for (let level = 0; level < 4; level++) {
+      for (const k of frontier) {
+        const p = this.raw.get(k) ? this.parentKeyOf(this.raw.get(k)!) : undefined;
+        if (p && !this.raw.has(p)) {
+          need.add(p);
+          if (!why.has(p)) why.set(p, `Parent of ${k}`);
+        }
+      }
+      if (!need.size) break;
+      const known = (k: string) => this.index.get(k) ?? this.outside.get(k);
+      const added = this.add([...need].filter((k) => known(k)).map((k) => known(k)!));
+      const fetched = await this.fetchKeys([...need].filter((k) => !known(k)), signal);
+      for (const k of fetched) this.outside.set(k, this.raw.get(k)!);
+      for (const k of [...added, ...fetched]) this.inclusion.set(k, { tier: 'context', reasons: [why.get(k) ?? 'Context'] });
+      frontier = [...added, ...fetched];
+      need.clear();
+    }
+  }
+
   async load(progress: Progress, signal?: AbortSignal): Promise<void> {
     this.raw.clear();
     this.childrenQueried.clear();
-    this.truncated = false;
+    this.query = { loaded: 0, more: false };
+    this.skipped.clear();
+    this.childrenCut = false;
     this.tombstones.clear();
     this.lastPresenceAt = Date.now();
 
     progress('Running query…');
     const s = this.source;
     const jql = s.kind === 'jql' ? s.jql : s.kind === 'keys' ? keyJql(s.keys) : 'project = SHOP AND issuetype = Epic';
-    const first = await this.issues.search(jql, this.fields, this.opts.maxIssues, signal);
-    this.add(first);
-    this.roots = first.map((i) => i.key);
+    this.outside.clear();
+    if (this.scoped) {
+      await this.loadScoped(jql, progress, signal);
+      return;
+    }
+    this.index.clear();
+    this.selection = undefined;
+    this.inclusion.clear();
+    const first = await this.page(jql, this.opts.maxIssues, signal);
+    this.add(first.issues);
+    this.roots = first.issues.map((i) => i.key);
+    this.query = { loaded: first.issues.length, more: first.hasMore };
+    if (first.hasMore && this.issues.count) {
+      try {
+        this.query.total = await this.issues.count(jql, signal);
+      } catch {
+        // The count is a nicety for the message; the "more" signal alone is enough.
+      }
+    }
 
+    // At the limit the loop still runs: children are probed by key and refs are known, so whatever
+    // the limit refuses is recorded exactly (fetchKeys) instead of being assumed.
     let frontier = this.roots;
-    for (let d = 0; d < this.opts.depth && frontier.length && !this.full; d++) {
+    for (let d = 0; d < this.opts.depth && frontier.length; d++) {
       progress(`Expanding relations (level ${d + 1}/${this.opts.depth}, ${this.raw.size} issues)…`);
       const children = this.opts.includeChildren ? await this.fetchChildren(frontier, signal) : [];
       const refs = this.unloadedRefs(frontier);
@@ -106,6 +253,18 @@ export class GraphSession {
 
   /** Fetches the given keys if they are stubs, plus their children. */
   async expand(keys: string[], progress: Progress, signal?: AbortSignal): Promise<void> {
+    const before = new Set(this.raw.keys());
+    await this.expandInner(keys, progress, signal);
+    if (this.scoped) {
+      for (const k of this.raw.keys()) {
+        if (before.has(k)) continue;
+        this.requested.add(k);
+        this.inclusion.set(k, { tier: 'requested', reasons: [`Loaded with ${keys.join(', ')}`] });
+      }
+    }
+  }
+
+  private async expandInner(keys: string[], progress: Progress, signal?: AbortSignal): Promise<void> {
     progress(`Expanding ${keys.join(', ')}…`);
     await this.fetchKeys(keys.filter((k) => !this.raw.has(k)), signal);
     await this.fetchChildren(keys, signal);
@@ -137,11 +296,21 @@ export class GraphSession {
     for (const f of feed) this.cursorMs = Math.max(this.cursorMs, ms(f.fields.updated));
 
     const changed = feed.filter((f) => this.raw.has(f.key) && ms(this.raw.get(f.key)!.fields.updated) !== ms(f.fields.updated)).map((f) => f.key);
-    const unknown = feed.filter((f) => !this.raw.has(f.key)).map((f) => f.key);
+    // Left-out tickets the index already has at the same version need no refetch.
+    const unknown = feed
+      .filter((f) => !this.raw.has(f.key) && !(this.index.has(f.key) && ms(this.index.get(f.key)!.fields.updated) === ms(f.fields.updated)))
+      .map((f) => f.key);
 
     // 2. Refresh changed issues in full.
     if (changed.length) {
-      for (const batch of chunks(changed, BATCH)) this.add(await this.searchTolerant(batch, signal));
+      for (const batch of chunks(changed, BATCH)) {
+        const got = await this.searchTolerant(batch, signal);
+        this.add(got);
+        for (const i of got) {
+          if (this.index.has(i.key)) this.index.set(i.key, i);
+          if (this.outside.has(i.key)) this.outside.set(i.key, i);
+        }
+      }
       result.changed.push(...changed);
     }
 
@@ -162,18 +331,31 @@ export class GraphSession {
           }
         }
       }
-      const joins = fresh.filter((i) => {
-        const parent = this.parentKeyOf(i);
-        return (
-          matchesQuery.has(i.key) ||
-          (this.opts.includeChildren && !!parent && this.raw.has(parent)) ||
-          (i.fields.issuelinks ?? []).some((l) => this.raw.has((l.outwardIssue ?? l.inwardIssue)!.key))
-        );
-      });
+      const linksLoaded = (i: RawIssue) => (i.fields.issuelinks ?? []).some((l) => this.raw.has((l.outwardIssue ?? l.inwardIssue)!.key));
+      let joins: RawIssue[];
+      if (this.scoped) {
+        // Scoped: the universe (index) learns every change; only sprint work, recent done and
+        // tickets linked to loaded ones join the graph. The rest updates the "+N more" counts.
+        fresh.filter((i) => matchesQuery.has(i.key)).forEach((i) => this.index.set(i.key, i));
+        const cls = classify([...this.index.values()], this.scoped, { sprintField: this.opts.sprintField, epicLinkField: this.opts.epicLinkField });
+        joins = fresh.filter((i) => {
+          const t = cls.get(i.key)?.tier;
+          return t === 'sprint' || t === 'done' || linksLoaded(i);
+        });
+        for (const i of joins) {
+          const c = cls.get(i.key);
+          this.inclusion.set(i.key, c && (c.tier === 'sprint' || c.tier === 'done') ? { tier: c.tier, reasons: c.reasons.map((r) => r.label) } : { tier: 'context', reasons: ['Linked to a loaded ticket'] });
+        }
+      } else {
+        joins = fresh.filter((i) => {
+          const parent = this.parentKeyOf(i);
+          return matchesQuery.has(i.key) || (this.opts.includeChildren && !!parent && this.raw.has(parent)) || linksLoaded(i);
+        });
+      }
       const revived = joins.filter((i) => this.tombstones.has(i.key));
       revived.forEach((i) => this.tombstones.delete(i.key));
       const added = this.add(joins);
-      matchesQuery.forEach((k) => !this.roots.includes(k) && this.roots.push(k));
+      if (!this.scoped) matchesQuery.forEach((k) => !this.roots.includes(k) && this.roots.push(k));
       result.added.push(...added);
     }
 
@@ -207,6 +389,7 @@ export class GraphSession {
       const now = present.get(id);
       if (now === undefined) {
         this.raw.delete(key);
+        this.index.delete(key);
         this.tombstones.set(key, Date.now());
         this.roots = this.roots.filter((k) => k !== key);
         result.removed.push(key);
@@ -243,8 +426,24 @@ export class GraphSession {
   }
 
   private get full(): boolean {
-    if (this.raw.size >= this.opts.maxIssues) this.truncated = true;
-    return this.truncated;
+    return this.raw.size >= this.opts.maxIssues;
+  }
+
+  /** Raise (or lower) the issue limit for the next load / expansion. */
+  setLimit(maxIssues: number) {
+    this.opts = { ...this.opts, maxIssues };
+  }
+
+  private canHaveChildren(k: string): boolean {
+    const i = this.raw.get(k);
+    return !!i && !i.fields.issuetype?.subtask && !this.childrenQueried.has(k);
+  }
+
+  /** Search that knows whether Jira has more results (sources without `searchPage` fall back to a guess). */
+  private async page(jql: string, max: number, signal?: AbortSignal, fields = this.fields): Promise<SearchPage> {
+    if (this.issues.searchPage) return this.issues.searchPage(jql, fields, max, signal);
+    const issues = await this.issues.search(jql, fields, max, signal);
+    return { issues, hasMore: issues.length >= max };
   }
 
   private add(issues: RawIssue[]): string[] {
@@ -252,10 +451,11 @@ export class GraphSession {
     for (const i of issues) {
       if (!this.raw.has(i.key)) {
         if (this.raw.size >= this.opts.maxIssues) {
-          this.truncated = true;
+          this.skipped.add(i.key);
           continue;
         }
         added.push(i.key);
+        this.skipped.delete(i.key);
       }
       this.raw.set(i.key, i);
     }
@@ -269,7 +469,10 @@ export class GraphSession {
   private async fetchKeys(keys: string[], signal?: AbortSignal): Promise<string[]> {
     const added: string[] = [];
     for (const batch of chunks(keys, BATCH)) {
-      if (this.full) break;
+      if (this.full) {
+        batch.filter((k) => !this.raw.has(k)).forEach((k) => this.skipped.add(k));
+        continue;
+      }
       added.push(...this.add(await this.searchTolerant(batch, signal)));
     }
     return added;
@@ -295,22 +498,34 @@ export class GraphSession {
     }
   }
 
+  /**
+   * Children in two steps: a keys-only query (cheap), then a full fetch of only the keys not loaded
+   * yet. The limit is applied in fetchKeys, which records by key what it had to skip.
+   */
   private async fetchChildren(keys: string[], signal?: AbortSignal): Promise<string[]> {
-    const parents = keys.filter((k) => {
-      const i = this.raw.get(k);
-      return i && !i.fields.issuetype?.subtask && !this.childrenQueried.has(k);
-    });
-    parents.forEach((k) => this.childrenQueried.add(k));
+    const parents = keys.filter((k) => this.canHaveChildren(k));
     const added: string[] = [];
     for (const batch of chunks(parents, BATCH)) {
-      if (this.full) break;
       const list = batch.join(',');
       let jql = `parent in (${list})`;
       if (this.opts.epicLinkField) jql += ` OR ${jqlField(this.opts.epicLinkField)} in (${list})`;
+      let found: SearchPage;
       try {
-        added.push(...this.add(await this.issues.search(jql, this.fields, this.remaining(), signal)));
+        found = await this.page(jql, CHILD_PROBE, signal, ['parent']);
       } catch (e) {
         if (!(e instanceof JiraError) || e.status !== 400) throw e;
+        batch.forEach((k) => this.childrenQueried.add(k));
+        continue;
+      }
+      if (found.hasMore) this.childrenCut = true;
+      const fresh = found.issues.map((i) => i.key).filter((k) => !this.raw.has(k));
+      added.push(...(await this.fetchKeys(fresh, signal)));
+      // Parents whose children were all loaded are done; the rest stay open for a later expansion.
+      const missing = new Set(fresh.filter((k) => !this.raw.has(k)));
+      const parentOfChild = new Map(found.issues.map((i) => [i.key, i.fields.parent?.key]));
+      for (const p of batch) {
+        const pending = [...missing].some((k) => parentOfChild.get(k) === p || !parentOfChild.get(k));
+        if (!pending && !found.hasMore) this.childrenQueried.add(p);
       }
     }
     return added;
@@ -335,8 +550,59 @@ export class GraphSession {
     return typeof epic === 'string' && epic ? epic : undefined;
   }
 
+  private scopeInfo(): ScopeInfo | undefined {
+    const cfg = this.scoped;
+    const sel = this.selection;
+    if (!cfg || !sel) return undefined;
+    const tierOf = (k: string) => sel.classified.get(k)?.tier;
+    const loadedTier = (t: IssueScope['tier']) => [...this.raw.keys()].filter((k) => this.inclusion.get(k)?.tier === t).length;
+    const count = (pred: (k: string) => boolean) => [...this.index.keys()].filter(pred).length;
+    const omitted: ScopeInfo['omitted'] = {};
+    for (const i of this.index.values()) {
+      if (this.raw.has(i.key)) continue;
+      const p = this.parentKeyOf(i);
+      if (!p || !this.raw.has(p)) continue;
+      const o = (omitted[p] ??= { backlog: 0, done: 0, new: 0, indeterminate: 0 });
+      const cat = i.fields.status?.statusCategory?.key;
+      if (cat === 'done') o.done++;
+      else {
+        o.backlog++;
+        if (cat === 'indeterminate') o.indeterminate++;
+        else o.new++;
+      }
+    }
+    return {
+      config: cfg,
+      limit: this.opts.maxIssues,
+      indexed: this.index.size,
+      indexCapped: this.indexMeta.capped,
+      universeTotal: this.indexMeta.total,
+      sprint: { total: count((k) => tierOf(k) === 'sprint'), shown: loadedTier('sprint') },
+      backlog: { total: count((k) => tierOf(k) === 'backlog'), shown: loadedTier('backlog') },
+      done: { total: count((k) => tierOf(k) === 'done' || tierOf(k) === 'oldDone'), recent: count((k) => tierOf(k) === 'done'), shown: loadedTier('done') },
+      context: loadedTier('context'),
+      requested: loadedTier('requested'),
+      omitted,
+    };
+  }
+
+  /** Undefined unless the limit really left something out. */
+  private truncationInfo(): Truncation | undefined {
+    const skipped = [...this.skipped].filter((k) => !this.raw.has(k) && !this.tombstones.has(k)).length;
+    if (!this.query.more && !skipped && !this.childrenCut) return undefined;
+    return {
+      limit: this.opts.maxIssues,
+      queryLoaded: this.query.loaded,
+      queryMore: this.query.more,
+      queryTotal: this.query.total,
+      skipped,
+      childrenCut: this.childrenCut,
+    };
+  }
+
   toModel(): GraphModel {
     const base = this.issues.baseUrl;
+    const truncation = this.truncationInfo();
     const issues = new Map<string, GraphIssue>();
     const links = new Map<string, GraphLink>();
 
@@ -382,6 +648,7 @@ export class GraphSession {
         sprints: this.opts.sprintField ? parseSprints(f[this.opts.sprintField]) : undefined,
         url: `${base}/browse/${i.key}`,
         loaded: true,
+        scope: this.scoped ? this.inclusion.get(i.key) ?? { tier: 'requested', reasons: ['Loaded on request'] } : undefined,
       });
     }
 
@@ -414,7 +681,9 @@ export class GraphSession {
       issues: [...issues.values()],
       links: [...links.values()],
       roots: this.roots,
-      truncated: this.truncated,
+      truncated: !!truncation,
+      truncation,
+      scopeInfo: this.scopeInfo(),
       fetchedAt: new Date().toISOString(),
     };
   }

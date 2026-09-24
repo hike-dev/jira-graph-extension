@@ -37,12 +37,36 @@ test('expanding a stub loads it', async () => {
   assert.equal(m.issues.find((i) => i.key === 'PLAT-12')?.loaded, true, 'children of expanded epic');
 });
 
-test('maxIssues truncates', async () => {
-  const s = new GraphSession(new DemoSource(), { kind: 'demo' }, { ...opts, maxIssues: 8 });
-  await s.load(() => {});
-  const m = s.toModel();
-  assert.equal(m.truncated, true);
-  assert.ok(m.issues.filter((i) => i.loaded).length <= 8);
+test('truncation is reported only when something was really left out', async () => {
+  // Exact fit: a limit equal to what the graph needs is not truncation (the old false positive).
+  const full = new GraphSession(new DemoSource(), { kind: 'demo' }, opts);
+  await full.load(() => {});
+  const needed = full.toModel().issues.filter((i) => i.loaded).length;
+  const exact = new GraphSession(new DemoSource(), { kind: 'demo' }, { ...opts, maxIssues: needed });
+  await exact.load(() => {});
+  assert.equal(exact.toModel().truncated, false, `exact fit at ${needed} is not truncated`);
+  assert.equal(exact.toModel().truncation, undefined);
+
+  // The query itself has more results than the limit: Jira's "more" signal plus the real total.
+  const q = new GraphSession(new DemoSource(), { kind: 'jql', jql: 'project = SHOP' }, { ...opts, depth: 0, maxIssues: 5 });
+  await q.load(() => {});
+  const t = q.toModel().truncation!;
+  assert.equal(t.queryMore, true);
+  assert.equal(t.queryLoaded, 5);
+  assert.ok(t.queryTotal! > 5, `total ${t.queryTotal}`);
+
+  // All query results fit, but expansion stopped at the limit: related tickets skipped, query not cut.
+  const e = new GraphSession(new DemoSource(), { kind: 'demo' }, { ...opts, maxIssues: 8 });
+  await e.load(() => {});
+  const te = e.toModel().truncation!;
+  assert.equal(te.queryMore, false);
+  assert.ok(te.skipped > 0 || te.childrenCut, 'expansion cut is reported');
+  assert.ok(e.toModel().issues.filter((i) => i.loaded).length <= 8);
+
+  // Raising the limit and reloading clears it.
+  e.setLimit(500);
+  await e.load(() => {});
+  assert.equal(e.toModel().truncation, undefined);
 });
 
 test('ELK layout: edges and nested modes produce positioned nodes and routed edges', async () => {
@@ -379,4 +403,50 @@ test('filter: text + facets (OR within, AND across), flags, facet counts, sortin
   const graphOrder = f.sortMatches(items, 'graph', { stage: (i) => stageOf(i), position: (k) => pos.get(k) }).map((i) => i.key);
   assert.deepEqual(graphOrder, ['A-2', 'A-1', 'A-3', 'A-4'], 'reading order (same row left→right), hidden last');
   assert.deepEqual(f.sortMatches(items, 'key', { stage: (i) => stageOf(i), position: () => undefined }).map((i) => i.key), ['A-1', 'A-2', 'A-3', 'A-4']);
+});
+
+test('load scope: sprint always, graded backlog, recent done, context, +N more, local re-scope', async () => {
+  const src = new DemoSource();
+  const scope = { enabled: true, backlog: 1, doneDays: 0, future: true, context: true };
+  const s = new GraphSession(src, { kind: 'jql', jql: 'project = SHOP ORDER BY updated DESC', scope }, { ...opts });
+  await s.load(() => {});
+  const m = s.toModel();
+  const tier = (k: string) => m.issues.find((i) => i.key === k)?.scope?.tier;
+  // Sprint work (active + future), including done tickets that sit in the active sprint.
+  for (const k of ['SHOP-21', 'SHOP-24', 'SHOP-12', 'SHOP-25', 'SHOP-111']) assert.equal(tier(k), 'sprint', k);
+  // Parents and linked tickets come in as context, with a reason.
+  assert.equal(tier('SHOP-10'), 'context');
+  assert.match(m.issues.find((i) => i.key === 'SHOP-10')!.scope!.reasons[0], /Parent of/);
+  assert.equal(tier('SHOP-23'), 'context', 'done blocker of sprint work is context even with doneDays 0');
+  // Exactly one graded backlog ticket, the best-scored one, with its rank and reasons.
+  const backlog = m.issues.filter((i) => i.scope?.tier === 'backlog');
+  assert.equal(backlog.length, 1);
+  assert.equal(backlog[0].scope!.rank, 1);
+  assert.ok(backlog[0].scope!.reasons.some((r) => r.startsWith('Linked to sprint work')), backlog[0].scope!.reasons.join('; '));
+  // Old done child of sprint work is left out but counted for its parent.
+  assert.equal(tier('SHOP-211'), undefined);
+  const info = m.scopeInfo!;
+  assert.equal(info.omitted['SHOP-21']?.done, 1, 'SHOP-211 counted under SHOP-21');
+  assert.equal(info.backlog.shown, 1);
+  assert.ok(info.backlog.total > 1);
+  assert.equal(m.truncated, false, 'leaving tickets out on purpose is not truncation');
+
+  // Re-scoping is local: no new query, more backlog appears.
+  let searches = 0;
+  const orig = src.searchPage.bind(src);
+  src.searchPage = async (...a) => ((searches += 1), orig(...a));
+  await s.setScope({ ...scope, backlog: 10, doneDays: 14 }, () => {});
+  const m2 = s.toModel();
+  assert.equal(searches, 0, 'no request: index and out-of-project context are reused');
+  assert.ok(m2.scopeInfo!.backlog.shown > 1);
+  assert.equal(m2.issues.find((i) => i.key === 'SHOP-211')?.scope?.tier, 'done', 'recent done now included');
+
+  // "+N more" loads a parent's left-out children.
+  await s.setScope({ ...scope, backlog: 0 }, () => {});
+  const before = s.toModel().scopeInfo!.omitted['SHOP-30'];
+  assert.ok(before && before.backlog > 0, 'SHOP-30 has left-out backlog children');
+  await s.loadMore('SHOP-30', () => {});
+  const m3 = s.toModel();
+  assert.equal(m3.scopeInfo!.omitted['SHOP-30'], undefined, 'nothing left out under SHOP-30');
+  assert.equal(m3.issues.find((i) => i.key === 'SHOP-34')?.scope?.tier, 'requested');
 });

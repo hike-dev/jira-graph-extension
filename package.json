@@ -607,6 +607,30 @@
               "done"
             ]
           }
+        },
+        "jiraGraph.scope.backlog": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 0,
+          "description": "Sprint scope: how many backlog tickets to load, ranked by relevance (linked to sprint work, same epic, priority, recency, carried over, due soon)."
+        },
+        "jiraGraph.scope.doneDays": {
+          "type": "integer",
+          "default": 14,
+          "minimum": -1,
+          "description": "Sprint scope: load done tickets resolved within this many days (0 = none, -1 = all). Older done tickets still count in progress bars and '+N more' chips, and are loaded when they explain something shown."
+        },
+        "jiraGraph.scope.futureSprints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Sprint scope: include tickets planned for future sprints."
+        },
+        "jiraGraph.scope.indexLimit": {
+          "type": "integer",
+          "default": 2000,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Sprint scope: most tickets indexed from the query to choose from."
         }
       }
     }

@@ -9,6 +9,7 @@ import { descriptionBlock, DescriptionState, fitDescription, HoverCard } from '.
 import { sanitizeDescription } from './sanitize';
 import { Tooltips } from './tooltip';
 import { FilterPanel, FilterPrefs } from './filterPanel';
+import { ScopePanel } from './scopePanel';
 
 // Inline (same-origin) stylesheet: lets SVG export read the rules back via CSSOM.
 const styleEl = document.createElement('style');
@@ -120,6 +121,7 @@ app.innerHTML = `
 <header class="toolbar">
   <div class="title"><span class="title-text">Jira Graph</span><span class="stats"></span></div>
   <button class="live" data-action="syncNow" data-tip-fn="live" aria-label="Live sync"><span class="dot"></span><span class="live-text">live</span></button>
+  <button class="scopebtn" hidden data-tip="Load scope" data-tip-desc="What this graph loads from its query: sprint work always, the most relevant backlog tickets, recently done work. Click to change." aria-label="Load scope">${UI_ICONS.target}<span class="scope-sum"></span><span class="caret">▾</span></button>
   <div class="spacer"></div>
   <div class="filterbox" role="search">
     <span class="fb-icon">${UI_ICONS.search}</span>
@@ -409,10 +411,17 @@ function indexModel(m: GraphModel) {
       r.indeterminate += sub.indeterminate;
       r.done += sub.done;
     }
+    // Left-out children of a scoped graph still count toward progress.
+    const om = m.scopeInfo?.omitted[k];
+    if (om) {
+      r.new += om.new;
+      r.indeterminate += om.indeterminate;
+      r.done += om.done;
+    }
     rollups.set(k, r);
     return r;
   };
-  for (const k of childrenOf.keys()) roll(k, new Set([k]));
+  for (const k of new Set([...childrenOf.keys(), ...Object.keys(m.scopeInfo?.omitted ?? {})])) roll(k, new Set([k]));
 }
 
 /** Tarjan SCC over "blocks" links; any SCC with more than one issue is a dependency cycle. */
@@ -570,6 +579,8 @@ async function relayout(opts: { fit?: boolean } = {}) {
 const nodeEls = new Map<string, SVGGElement>();
 // eslint-disable-next-line prefer-const -- assigned once the DOM and helpers exist (see init at the end)
 let filterPanel: FilterPanel;
+// eslint-disable-next-line prefer-const -- assigned at init
+let scopePanel: ScopePanel;
 
 function render() {
   if (!lay || !model) return;
@@ -738,6 +749,19 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
       if (segW > 0) el('rect', { class: `seg st-${cat}`, x, width: segW, height: 3, rx: 1.5 }, bar);
       x += segW;
     }
+  }
+
+  // "+N" left out by the load scope: click loads them.
+  const om = model?.scopeInfo?.omitted[i.key];
+  if (om && om.backlog + om.done > 0) {
+    const n = om.backlog + om.done;
+    const label = `+${n}`;
+    const tw = measure(label, `700 10.5px ${fontFamily}`) + 14;
+    const more = el('g', { class: 'g-more', transform: `translate(10 -9)` }, g);
+    el('rect', { width: tw, height: 18, rx: 9 }, more);
+    el('text', { x: tw / 2, y: 12.6 }, more).textContent = label;
+    more.setAttribute('data-tip', `${n} more not loaded`);
+    more.setAttribute('data-tip-desc', `${[om.backlog ? `${om.backlog} open` : '', om.done ? `${om.done} done` : ''].filter(Boolean).join(' · ')} under ${i.key}, left out by the load scope.\nClick to load them.`);
   }
 
   // Badges
@@ -1100,6 +1124,10 @@ svg.addEventListener('click', (e) => {
   }
   if (t.closest('.g-expand')) {
     post({ type: 'expand', keys: [key] });
+    return;
+  }
+  if (t.closest('.g-more')) {
+    post({ type: 'loadMore', parent: key });
     return;
   }
   highlight = undefined;
@@ -1562,7 +1590,25 @@ function renderBanner() {
   if (ui.lens === 'planning' && !hasSprintData(model.issues)) {
     parts.push(`<span class="warn">${UI_ICONS.warn} No sprint data on these tickets — check the <b>jiraGraph.sprintField</b> setting (Cloud default customfield_10020)</span>`);
   }
-  if (model.truncated) parts.push(`<span class="warn">${UI_ICONS.warn} Truncated at ${model.issues.filter((i) => i.loaded).length} loaded issues (jiraGraph.maxIssues)</span>`);
+  const si = model.scopeInfo;
+  if (si) {
+    const doneTxt = si.config.doneDays < 0 ? 'all' : si.config.doneDays === 0 ? 'none' : `${si.done.shown} of ${si.done.total}`;
+    parts.push(`<span class="info" data-tip="Sprint scope" data-tip-desc="Loaded by the scope, not cut by a limit. Change it with the Scope button; +N chips load a parent's left-out tickets.">${UI_ICONS.target} <span>Sprint scope: ${si.sprint.shown} sprint · ${si.backlog.shown} of ${si.backlog.total} backlog · done ${doneTxt}${si.context ? ` · ${si.context} context` : ''}.&nbsp;</span><button data-b="scope">Change</button></span>`);
+  }
+  const t = model.truncation;
+  if (t) {
+    // Only reported when Jira said more exists, or expansion really skipped something because of the limit.
+    // The graph holds `limit` tickets when it is cut; suggest room for what was left out, plus 10%.
+    const suggest = Math.min(2000, Math.ceil(((t.queryTotal ?? t.limit + Math.max(t.skipped, 1)) * 1.1) / 100) * 100);
+    const raise = suggest > t.limit ? ` <button data-b="raise" data-to="${suggest}">Raise limit to ${suggest}</button>` : '';
+    if (t.queryMore) {
+      const of = t.queryTotal !== undefined ? `${t.queryTotal}` : `more than ${t.queryLoaded}`;
+      parts.push(`<span class="warn" data-tip="Issue limit reached" data-tip-desc="The query matches ${esc(of)} tickets; the graph loads at most ${t.limit} (jiraGraph.maxIssues). Narrow the query or raise the limit.">${UI_ICONS.warn} <span>Showing ${t.queryLoaded} of ${esc(of)} tickets matching the query.&nbsp;</span>${raise}</span>`);
+    } else if (t.skipped || t.childrenCut) {
+      const what = [t.skipped ? `${t.skipped} related ticket${t.skipped === 1 ? '' : 's'} shown as placeholders` : '', t.childrenCut ? 'some children not loaded' : ''].filter(Boolean).join(' · ');
+      parts.push(`<span class="info" data-tip="All query results are shown" data-tip-desc="Expansion stopped at ${t.limit} tickets (jiraGraph.maxIssues). Placeholders can be loaded with + or Load relations.">${UI_ICONS.graph} <span>${esc(what)} (limit ${t.limit}).&nbsp;</span>${raise}</span>`);
+    }
+  }
   if (linksFocused && lay) {
     const n = lay.edges.filter((e) => e.kind !== 'hierarchy').length;
     parts.push(`<span>${UI_ICONS.graph} ${n} links hidden until you select or hover a ticket <button data-b="alllinks">Show all</button></span>`);
@@ -1582,6 +1628,9 @@ function renderBanner() {
     b.addEventListener('click', () => {
       const a = b.dataset.b;
       if (a === 'unfocus') setFocus(undefined);
+      if (a === 'raise') post({ type: 'raiseLimit', to: Number(b.dataset.to) });
+      // Deferred: this click must finish bubbling (outside-click closes popovers) before the panel opens.
+      if (a === 'scope') setTimeout(() => $<HTMLButtonElement>('.scopebtn').click(), 0);
       if (a === 'alllinks') {
         ui.linkVisibility = 'all';
         saveState();
@@ -2067,6 +2116,7 @@ function applySync(next: GraphModel, diff: SyncDiff) {
   model = next;
   indexModel(model);
   recomputeLens();
+  scopePanel?.refresh();
   if (selected && !byKey.has(selected)) {
     toast(`${selected} is no longer available (deleted, moved or no access).`);
     selected = undefined;
@@ -2174,6 +2224,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       saveState();
       indexModel(model);
       recomputeLens();
+      scopePanel?.refresh();
       if (selected && !byKey.has(selected)) selected = undefined;
       syncToolbar();
       renderDrawer();
@@ -2195,6 +2246,12 @@ window.addEventListener('resize', () => drawMinimap());
 
 syncToolbar();
 setDrawerWidth(ui.drawerWidth ?? DRAWER_DEFAULT);
+scopePanel = new ScopePanel({
+  app,
+  info: () => model?.scopeInfo,
+  scopable: () => model?.source.kind === 'jql',
+  apply: (scope) => post({ type: 'setScope', scope }),
+});
 filterPanel = new FilterPanel(
   {
     app,

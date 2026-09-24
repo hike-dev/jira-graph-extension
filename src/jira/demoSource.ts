@@ -1,4 +1,4 @@
-import { IssueSource, RawIssue, RawIssueLink, RawIssueRef } from './types';
+import { IssueSource, RawIssue, RawIssueLink, RawIssueRef, SearchPage } from './types';
 
 // Offline demo dataset: lets people explore the graph without Jira credentials.
 
@@ -186,8 +186,21 @@ export class DemoSource implements IssueSource {
   private readonly issues = buildIssues();
   private seq = 0;
 
+  async search(jql: string, _fields: string[] = [], max = Infinity): Promise<RawIssue[]> {
+    return (await this.searchPage(jql, _fields, max)).issues;
+  }
+
+  async searchPage(jql: string, _fields: string[] = [], max = Infinity): Promise<SearchPage> {
+    const all = await this.match(jql);
+    return { issues: all.slice(0, max), hasMore: all.length > max };
+  }
+
+  async count(jql: string): Promise<number> {
+    return (await this.match(jql)).length;
+  }
+
   /** Supports the predicates GraphSession generates, combined with AND. */
-  async search(jql: string): Promise<RawIssue[]> {
+  private async match(jql: string): Promise<RawIssue[]> {
     await new Promise((r) => setTimeout(r, 120));
     const list = (re: RegExp) => (re.exec(jql)?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     let out = [...this.issues.values()];

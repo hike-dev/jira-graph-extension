@@ -137,6 +137,26 @@ After connecting you pick the **project** this workspace works with (`jiraGraph.
 
 Package: `npm run package` gives you a `.vsix`. Install it with *Extensions → … → Install from VSIX*.
 
+## Load scope
+
+**Open Project Graph** uses a *Sprint scope* instead of loading every ticket up to the limit. Other JQL graphs can switch to it with the **Scope** button.
+
+1. The whole query (e.g. `project = KEY`) is indexed once. Up to `jiraGraph.scope.indexLimit` tickets are indexed, with full fields.
+2. What to load is chosen locally, so changing the scope needs no new Jira query:
+   - **Sprint:** active sprint (including its done tickets), plus future sprints (`jiraGraph.scope.futureSprints`). Always loaded.
+   - **Context:** parents and directly linked tickets of what is loaded. Always loaded, taken from the index when possible.
+   - **Backlog:** the top N by relevance (`jiraGraph.scope.backlog`, 50). Score: linked to sprint work +50 · same epic as sprint work +20 · priority up to +30 · recently updated up to +20 (fading over 14 days) · carried over +15 · due within 14 days +25.
+   - **Done:** resolved within `jiraGraph.scope.doneDays` (14; 0 = none, −1 = all). Older ones load only as context, e.g. a resolved blocker.
+- **Left out is not lost.**
+  - Left-out children still count in progress bars.
+  - Parents show a **+N** chip that loads them.
+  - The hover card says why each ticket is in the graph (tier, rank, score and reasons).
+  - The banner summarises the scope instead of warning; the limit warning appears only if the scope itself exceeds `jiraGraph.maxIssues`.
+- **The Scope panel** has per-tier counts, a backlog slider, done steps, future sprints on/off, a budget bar against the limit, and *Whole query* to load the query as-is.
+- **Live sync keeps it current:**
+  - Tickets moving into a sprint (or becoming recently done) join the graph.
+  - Other changes update the counts.
+
 ## Live sync
 
 Open graphs stay current without re-fetching everything.
@@ -170,7 +190,7 @@ Open graphs stay current without re-fetching everything.
 | Setting | Default | Purpose |
 |---|---|---|
 | `jiraGraph.expandDepth` | 2 | Rounds of parents / children / links followed from the query result |
-| `jiraGraph.maxIssues` | 300 | Hard cap per graph |
+| `jiraGraph.maxIssues` | 300 | Hard cap per graph. A warning appears only when Jira reports more query results (*Showing 300 of 336…*, with *Raise limit*), or when expansion really skipped related tickets (shown as placeholders) |
 | `jiraGraph.includeChildren` | true | Fetch children of epics / stories |
 | `jiraGraph.epicLinkField` | – | Epic Link field id for Server/DC or legacy projects |
 | `jiraGraph.storyPointsField` | – | Shown in the details drawer |

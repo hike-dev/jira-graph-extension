@@ -34,10 +34,20 @@ export interface RawIssue {
   };
 }
 
+export interface SearchPage {
+  issues: RawIssue[];
+  /** Jira reported more matching issues beyond `max` (not a guess from hitting the limit). */
+  hasMore: boolean;
+}
+
 /** Minimal search contract implemented by the real client and the demo client. */
 export interface IssueSource {
   readonly baseUrl: string;
   search(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]>;
+  /** Like `search`, but also says whether Jira has more results than were returned. */
+  searchPage?(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<SearchPage>;
+  /** Number of issues matching the JQL (approximate on Cloud). */
+  count?(jql: string, signal?: AbortSignal): Promise<number>;
   /**
    * Which of the given numeric issue ids still exist and are visible to the user.
    * Returns id → current key (a different key means the issue was moved to another project).

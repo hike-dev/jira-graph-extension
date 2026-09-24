@@ -1,4 +1,4 @@
-import { IssueSource, RawIssue } from './types';
+import { IssueSource, RawIssue, SearchPage } from './types';
 
 export type Deployment = 'cloud' | 'server';
 
@@ -107,13 +107,27 @@ export class JiraClient implements IssueSource {
   }
 
   async search(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]> {
+    return (await this.searchPage(jql, fields, max, signal)).issues;
+  }
+
+  async searchPage(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<SearchPage> {
     return this.conn.deployment === 'cloud'
       ? this.searchCloud(jql, fields, max, signal)
       : this.searchServer(jql, fields, max, signal);
   }
 
+  async count(jql: string, signal?: AbortSignal): Promise<number> {
+    const where = jql.replace(/\border\s+by\b[\s\S]*$/i, '').trim();
+    if (this.conn.deployment === 'cloud') {
+      const r = await this.request<{ count: number }>('POST', '/rest/api/3/search/approximate-count', { jql: where }, signal);
+      return r.count;
+    }
+    const r = await this.request<{ total: number }>('POST', '/rest/api/2/search', { jql: where, maxResults: 0 }, signal);
+    return r.total;
+  }
+
   /** Jira Cloud enhanced search (token-based pagination). */
-  private async searchCloud(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]> {
+  private async searchCloud(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<SearchPage> {
     const out: RawIssue[] = [];
     let nextPageToken: string | undefined;
     do {
@@ -126,11 +140,12 @@ export class JiraClient implements IssueSource {
       out.push(...page.issues);
       nextPageToken = page.isLast === false || page.nextPageToken ? page.nextPageToken : undefined;
     } while (nextPageToken && out.length < max);
-    return out;
+    // A next-page token left over means Jira has more than we asked for.
+    return { issues: out, hasMore: !!nextPageToken };
   }
 
   /** Jira Server / Data Center offset-based search. */
-  private async searchServer(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<RawIssue[]> {
+  private async searchServer(jql: string, fields: string[], max: number, signal?: AbortSignal): Promise<SearchPage> {
     const out: RawIssue[] = [];
     let total = Infinity;
     while (out.length < max && out.length < total) {
@@ -144,6 +159,6 @@ export class JiraClient implements IssueSource {
       out.push(...page.issues);
       if (page.issues.length === 0) break;
     }
-    return out;
+    return { issues: out, hasMore: total !== Infinity && total > out.length };
   }
 }

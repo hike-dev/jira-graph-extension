@@ -64,6 +64,14 @@ export function fitDescription(root: Element) {
   d.classList.toggle('fits', body.scrollHeight <= body.clientHeight + 2);
 }
 
+const TIER_LABELS: Record<string, string> = {
+  sprint: 'Sprint work',
+  context: 'Context',
+  backlog: 'Backlog',
+  done: 'Recently done',
+  requested: 'Loaded on request',
+};
+
 const GRACE_MS = 180;
 /** Moving from one ticket to another while a card is open switches quickly. */
 const WARM_DELAY = 180;
@@ -293,6 +301,7 @@ export class HoverCard {
       ${hierarchy.length ? `<div class="hc-section">${hierarchy.join('')}</div>` : ''}
       ${relations.length || chain ? `<div class="hc-section">${chain}${relations.join('')}</div>` : ''}
       ${lensHtml ? `<div class="hc-section">${lensHtml}</div>` : ''}
+      ${i.scope ? `<div class="hc-section hc-why"><span class="hc-muted">In the graph because</span><div><span class="hc-tier t-${i.scope.tier}">${esc(TIER_LABELS[i.scope.tier])}${i.scope.rank ? ` · rank ${i.scope.rank}` : ''}${i.scope.score !== undefined ? ` · score ${i.scope.score}` : ''}</span></div>${i.scope.reasons.length ? `<ul>${i.scope.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}</div>` : ''}
       <div class="hc-foot">
         <span><kbd>Click</kbd> select</span><span><kbd>Enter</kbd> details</span><span><kbd>Dbl-click</kbd> Jira</span><span><kbd>Right-click</kbd> actions</span>
       </div>`;

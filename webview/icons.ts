@@ -30,6 +30,7 @@ export const UI_ICONS = {
   list: svg('<path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><circle cx="2.6" cy="4" r=".7" fill="currentColor"/><circle cx="2.6" cy="8" r=".7" fill="currentColor"/><circle cx="2.6" cy="12" r=".7" fill="currentColor"/>'),
   chevL: svg('<path d="m10 3.5-4.5 4.5 4.5 4.5"/>'),
   chevR: svg('<path d="m6 3.5 4.5 4.5-4.5 4.5"/>'),
+  target: svg('<circle cx="8" cy="8" r="5.8"/><circle cx="8" cy="8" r="2.6"/><circle cx="8" cy="8" r=".6" fill="currentColor"/>'),
   info: svg('<circle cx="8" cy="8" r="6"/><path d="M8 7.2v4"/><circle cx="8" cy="4.9" r=".6" fill="currentColor"/>'),
   more: svg('<circle cx="3.5" cy="8" r="1.1" fill="currentColor"/><circle cx="8" cy="8" r="1.1" fill="currentColor"/><circle cx="12.5" cy="8" r="1.1" fill="currentColor"/>'),
   check: svg('<path d="m3.5 8.5 3 3 6-7"/>'),

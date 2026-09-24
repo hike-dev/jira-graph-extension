@@ -27,6 +27,49 @@ export interface GraphIssue {
   url: string;
   /** false when the issue is only known as a reference (link / parent / subtask) and was not fetched. */
   loaded: boolean;
+  /** Why the load scope included it (only for scoped graphs). */
+  scope?: IssueScope;
+}
+
+export interface IssueScope {
+  tier: 'sprint' | 'context' | 'backlog' | 'done' | 'requested';
+  /** Backlog rank by relevance (1 = most relevant). */
+  rank?: number;
+  score?: number;
+  reasons: string[];
+}
+
+export interface ScopeConfig {
+  enabled: boolean;
+  /** Top N backlog tickets by relevance. */
+  backlog: number;
+  /** Done tickets resolved within this many days; 0 = none, -1 = all. */
+  doneDays: number;
+  future: boolean;
+  context: boolean;
+}
+
+export interface ScopeCount {
+  total: number;
+  shown: number;
+}
+
+/** What the scope loaded out of the query's universe, and what it left out (per parent). */
+export interface ScopeInfo {
+  config: ScopeConfig;
+  /** jiraGraph.maxIssues, for the budget bar. */
+  limit: number;
+  /** Tickets in the index (the query's universe), and whether the index hit its cap. */
+  indexed: number;
+  indexCapped: boolean;
+  universeTotal?: number;
+  sprint: ScopeCount;
+  backlog: ScopeCount;
+  done: ScopeCount & { recent: number };
+  context: number;
+  requested: number;
+  /** Left-out tickets per parent that is in the graph: counts for "+N more" chips and rollups. */
+  omitted: Record<string, { backlog: number; done: number; new: number; indeterminate: number }>;
 }
 
 export interface SprintRef {
@@ -46,9 +89,22 @@ export interface GraphLink {
 }
 
 export type GraphSource =
-  | { kind: 'jql'; jql: string; title?: string }
+  | { kind: 'jql'; jql: string; title?: string; scope?: ScopeConfig }
   | { kind: 'keys'; keys: string[]; title?: string; demo?: boolean }
   | { kind: 'demo' };
+
+/** What the issue limit actually cut, based on Jira's own "more results" signal, not on reaching the limit. */
+export interface Truncation {
+  limit: number;
+  /** Issues the query returned, and whether Jira had more (with the total when it could be counted). */
+  queryLoaded: number;
+  queryMore: boolean;
+  queryTotal?: number;
+  /** Related issues (parents, links) that expansion wanted but skipped because of the limit. */
+  skipped: number;
+  /** Children queries stopped early because of the limit. */
+  childrenCut: boolean;
+}
 
 export interface GraphModel {
   title: string;
@@ -58,7 +114,10 @@ export interface GraphModel {
   links: GraphLink[];
   /** Keys returned directly by the query (as opposed to discovered by expansion). */
   roots: string[];
+  /** True only when something was really left out (see `truncation`). */
   truncated: boolean;
+  truncation?: Truncation;
+  scopeInfo?: ScopeInfo;
   fetchedAt: string;
 }
 
@@ -107,7 +166,10 @@ export type WebviewMessage =
   | { type: 'select'; key: string | undefined }
   | { type: 'copy'; text: string }
   | { type: 'exportSvg'; svg: string }
-  | { type: 'copyMermaid' };
+  | { type: 'copyMermaid' }
+  | { type: 'raiseLimit'; to: number }
+  | { type: 'setScope'; scope: ScopeConfig }
+  | { type: 'loadMore'; parent: string };
 
 export function linkCategory(name: string, label: string): LinkCategory {
   const s = `${name} ${label}`.toLowerCase();

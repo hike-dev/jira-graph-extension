@@ -20,6 +20,11 @@ Parked ideas and open questions, roughly by priority within each section.
 - [ ] Optional push channel: Forge app (issue + link events, web trigger) or admin webhook → relay; keep polling as the source of truth.
 - [ ] Whole-project scope without the `maxIssues` cap: store vs. rendered scope (project / unresolved / sprint / epic).
 
+## Load scope
+- [ ] Filter searches the whole index: matches not in the graph listed with “+ Add”.
+- [ ] Per-tier weights for the backlog score configurable (settings or panel).
+- [ ] Scope for non-sprint teams (Kanban): “in progress + next N by rank” instead of sprints.
+
 ## Layout and representation
 - [ ] Tech-tree tiers: labelled layer bands ("ready now", "1 step", …).
 - [ ] Dependencies lens: done / available / in progress / locked (🔒 N).
