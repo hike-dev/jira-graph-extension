@@ -12,6 +12,12 @@ export interface HoverCardContext {
   childrenOf: (key: string) => string[];
   rollup: (key: string) => { new: number; indeterminate: number; done: number } | undefined;
   blocked: (key: string) => boolean;
+  blockerSummary: (key: string) => string;
+  /** Worst still-blocking state of a ticket (colours the alert). */
+  blockState: (key: string) => string | undefined;
+  /** State of the blocks link from → to, for the stage dot on relation chips. */
+  linkState: (from: string, to: string) => string | undefined;
+  stageLabel: (i: GraphIssue) => string;
   lens: (key: string) => LensMark | undefined;
   lensLabel: () => string | undefined;
   chain: (key: string) => { up: Map<string, number>; down: Map<string, number> };
@@ -240,16 +246,17 @@ export class HoverCard {
     }
 
     // Relations, grouped by direction + label
-    const groups = new Map<string, string[]>();
+    const groups = new Map<string, { key: string; state?: string }[]>();
     for (const l of c.links()) {
-      if (l.from === i.key) groups.set(l.label, [...(groups.get(l.label) ?? []), l.to]);
+      if (l.from === i.key) groups.set(l.label, [...(groups.get(l.label) ?? []), { key: l.to, state: c.linkState(l.from, l.to) }]);
       else if (l.to === i.key) {
         const t = inverse(l.label);
-        groups.set(t, [...(groups.get(t) ?? []), l.from]);
+        groups.set(t, [...(groups.get(t) ?? []), { key: l.from, state: c.linkState(l.from, l.to) }]);
       }
     }
-    const relations = [...groups].map(([label, keys]) => {
-      const shown = keys.slice(0, 3).map((k) => (c.issue(k) ? chip(c.issue(k)!, c) : `<span class="hc-chip">${esc(k)}</span>`)).join('');
+    const relations = [...groups].map(([label, items]) => {
+      const keys = items.map((x) => x.key);
+      const shown = items.slice(0, 3).map((x) => (c.issue(x.key) ? chip(c.issue(x.key)!, c, x.state) : `<span class="hc-chip">${esc(x.key)}</span>`)).join('');
       const more = keys.length > 3 ? `<span class="hc-muted">+${keys.length - 3}</span>` : '';
       return `<div class="hc-rel"><span class="hc-rel-label">${esc(label)}</span><div class="hc-chips">${shown}${more}</div></div>`;
     });
@@ -267,7 +274,7 @@ export class HoverCard {
       : '';
 
     const alerts = [
-      c.blocked(i.key) ? `<div class="hc-alert bad">Blocked by an unresolved issue</div>` : '',
+      c.blocked(i.key) ? `<div class="hc-alert bad b-${c.blockState(i.key)}">${esc(c.blockerSummary(i.key))}</div>` : '',
       i.loaded ? '' : `<div class="hc-alert info">Not loaded yet — double-click or press <kbd>E</kbd> to load it and its relations</div>`,
     ].join('');
 
@@ -287,13 +294,15 @@ export class HoverCard {
       ${relations.length || chain ? `<div class="hc-section">${chain}${relations.join('')}</div>` : ''}
       ${lensHtml ? `<div class="hc-section">${lensHtml}</div>` : ''}
       <div class="hc-foot">
-        <span><kbd>Click</kbd> select</span><span><kbd>Dbl-click</kbd> open</span><span><kbd>Right-click</kbd> actions</span>
+        <span><kbd>Click</kbd> select</span><span><kbd>Enter</kbd> details</span><span><kbd>Dbl-click</kbd> Jira</span><span><kbd>Right-click</kbd> actions</span>
       </div>`;
   }
 }
 
-function chip(x: GraphIssue, c: HoverCardContext): string {
-  return `<button class="hc-chip s-${x.statusCategory}" data-reveal="${esc(x.key)}" title="${esc(`${x.key} · ${x.status}\n${x.summary}`)}">${iconMarkup(c.styleOf(x), 12)}<b>${esc(x.key)}</b></button>`;
+function chip(x: GraphIssue, c: HoverCardContext, blockState?: string): string {
+  const dot = blockState ? `<span class="hc-bdot b-${blockState}"></span>` : '';
+  const stage = blockState ? ` · ${c.stageLabel(x)}` : '';
+  return `<button class="hc-chip s-${x.statusCategory}" data-reveal="${esc(x.key)}" title="${esc(`${x.key} · ${x.status}${stage}\n${x.summary}`)}">${dot}${iconMarkup(c.styleOf(x), 12)}<b>${esc(x.key)}</b></button>`;
 }
 
 const INVERSE: Record<string, string> = {

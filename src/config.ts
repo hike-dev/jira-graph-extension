@@ -54,6 +54,7 @@ export function viewOptions(): ViewOptions {
       delayMs: Math.max(0, c.get<number>('hoverCard.delayMs', 1000)),
       descriptionLines: Math.max(1, c.get<number>('hoverCard.descriptionLines', 4)),
     },
+    statusStages: c.get<Record<string, string>>('statusStages', {}),
   };
 }
 

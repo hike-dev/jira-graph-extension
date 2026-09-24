@@ -318,3 +318,25 @@ test('session sync: changes, new children, deletions and moves', async () => {
   const again = await s.sync();
   assert.deepEqual([again.changed, again.added, again.removed], [[], [], []]);
 });
+
+test('workflow stages and blocking-link states (TMDXNC statuses)', async () => {
+  const { stageOf, blockState, normalizeStageOverrides } = await import('../src/shared/stages');
+  const s = (status: string, statusCategory: 'new' | 'indeterminate' | 'done') => stageOf({ status, statusCategory });
+  assert.equal(s('To Do', 'new'), 'todo');
+  assert.equal(s('Requirements Review', 'new'), 'todo');
+  assert.equal(s('In Progress', 'indeterminate'), 'dev');
+  assert.equal(s('In Review', 'indeterminate'), 'dev');
+  assert.equal(s('Dev Testing Passed', 'indeterminate'), 'test');
+  assert.equal(s('Ready for Testing', 'indeterminate'), 'test');
+  assert.equal(s('QA Passed', 'indeterminate'), 'test');
+  assert.equal(s('Done', 'done'), 'done');
+  const o = normalizeStageOverrides({ 'In Review': 'test', Bogus: 'nope' });
+  assert.equal(stageOf({ status: 'In Review', statusCategory: 'indeterminate' }, o), 'test', 'override wins');
+  assert.deepEqual(Object.keys(o), ['in review'], 'invalid override ignored');
+  assert.equal(blockState('todo', 'dev'), 'critical');
+  assert.equal(blockState('todo', 'todo'), 'todo');
+  assert.equal(blockState('dev', 'todo'), 'dev');
+  assert.equal(blockState('test', 'dev'), 'test');
+  assert.equal(blockState('dev', 'done'), 'stale');
+  assert.equal(blockState('done', 'dev'), 'resolved');
+});

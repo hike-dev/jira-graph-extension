@@ -92,7 +92,7 @@ export class GraphPanel {
       panel.onDidChangeViewState((e) => e.webviewPanel.active && this.setActive()),
       panel.webview.onDidReceiveMessage((m: WebviewMessage) => this.onMessage(m)),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout') || e.affectsConfiguration('jiraGraph.hoverCard')) {
+        if (e.affectsConfiguration('jiraGraph.issueTypeStyles') || e.affectsConfiguration('jiraGraph.layout') || e.affectsConfiguration('jiraGraph.hoverCard') || e.affectsConfiguration('jiraGraph.statusStages')) {
           if (this.model) this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'update' });
         }
         if (e.affectsConfiguration('jiraGraph.sync')) this.applySyncSettings();

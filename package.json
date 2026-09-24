@@ -593,6 +593,20 @@
           "minimum": 1,
           "maximum": 40,
           "description": "Lines of the ticket description shown before 'Show more' (hover card and details drawer)."
+        },
+        "jiraGraph.statusStages": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Workflow stage per status name, for blocker colours: `todo` (not started, red), `dev` (in development, orange), `test` (in testing, amber), `done`. Unlisted statuses use Jira's status category; In-Progress statuses whose name mentions test / QA / verify / UAT / staging count as `test`. Example: `{ \"Code Review\": \"dev\", \"QA Passed\": \"test\" }`.",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "todo",
+              "dev",
+              "test",
+              "done"
+            ]
+          }
         }
       }
     }

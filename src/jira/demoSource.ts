@@ -6,6 +6,7 @@ type Cat = 'new' | 'indeterminate' | 'done';
 const TODO: [string, Cat] = ['To Do', 'new'];
 const PROG: [string, Cat] = ['In Progress', 'indeterminate'];
 const REVIEW: [string, Cat] = ['In Review', 'indeterminate'];
+const TESTING: [string, Cat] = ['Ready for Testing', 'indeterminate'];
 const DONE: [string, Cat] = ['Done', 'done'];
 
 interface Def {
@@ -35,7 +36,7 @@ const DEFS: Def[] = [
 
   { key: 'SHOP-21', type: 'Story', summary: 'Apple Pay & Google Pay support', status: PROG, parent: 'SHOP-20', assignee: 'Marco Rossi', priority: 'High' },
   { key: 'SHOP-211', type: 'Sub-task', summary: 'Merchant certificates', status: DONE, parent: 'SHOP-21', assignee: 'Marco Rossi' },
-  { key: 'SHOP-212', type: 'Sub-task', summary: 'Wallet button component', status: REVIEW, parent: 'SHOP-21', assignee: 'Sara Novak' },
+  { key: 'SHOP-212', type: 'Sub-task', summary: 'Wallet button component', status: TESTING, parent: 'SHOP-21', assignee: 'Sara Novak' },
   { key: 'SHOP-22', type: 'Story', summary: 'Saved cards for returning customers', status: TODO, parent: 'SHOP-20' },
   { key: 'SHOP-23', type: 'Spike', summary: 'Evaluate 3DS2 providers', status: DONE, parent: 'SHOP-20', assignee: 'Sara Novak' },
   { key: 'SHOP-24', type: 'Bug', summary: 'Customer charged twice when payment is retried', status: TODO, parent: 'SHOP-20', priority: 'Highest', labels: ['incident'] },
@@ -77,6 +78,8 @@ const LINKS: [string, keyof typeof LINK_TYPES, string][] = [
   ['PLAT-7', 'causes', 'SHOP-24'],
   ['PLAT-12', 'relates', 'PLAT-7'],
   ['SHOP-14', 'relates', 'SHOP-11'],
+  ['SHOP-212', 'blocks', 'SHOP-24'],
+  ['SHOP-14', 'blocks', 'SHOP-13'],
 ];
 
 const DAY = 86_400_000;

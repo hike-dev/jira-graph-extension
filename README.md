@@ -32,6 +32,20 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
   - **Tree**: parent → child edges in a layered layout.
   - **Nested**: children drawn inside their parent's container. With *"links shape layout"* off, containers are rect-packed into a compact roadmap board.
 - **Link styling.** Each relation type has its own colour, dash pattern and arrowhead, plus optional labels.
+- **Blocking links show the blocker's stage** (colour + line style; motion = being worked on). Stages come from `jiraGraph.statusStages`, else from Jira's status category plus the status name (*test / QA / verify / UAT / staging* → testing).
+  - red solid: blocker not started;
+  - orange flowing dashes: blocker in development;
+  - amber slow dots: blocker in testing;
+  - thin faded green: blocker done;
+  - grey dashed: the blocked ticket is done although its blocker is open;
+  - thick pulsing red ⚠: the blocked ticket is already in progress while its blocker hasn't started.
+
+  The blocked badge, the details alert and the hover card's relation chips use the worst blocker's colour; the legend breaks *Blocks* down by state. Animations respect *reduce motion*.
+- **Select vs details.**
+  - Click selects (highlight and chains) without opening anything.
+  - Hovering a ticket shows an action bar: ⓘ *Details*, ↗ *Open in Jira*, ⋯ *More*.
+  - Once open, the details panel follows the selection until you close it (×, Esc, or a click on empty space).
+  - Keyboard: Enter opens details, Cmd/Ctrl+Enter opens Jira, double-click still opens Jira.
 - **Dependency analysis:**
   - A ⛔ badge marks issues blocked by unresolved issues.
   - **Blocks cycles** are detected (Tarjan SCC), animated, and reported in a banner.
@@ -68,7 +82,7 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Keyboard:**
   - `/` search · `F` fit · `+`/`-`/`0` zoom · `L` / `Shift+L` cycle lens
   - arrows move the selection spatially
-  - `Enter` opens · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `Esc` clears
+  - `Enter` details · `Cmd/Ctrl+Enter` Jira · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `Esc` clears
 - **Export:**
   - standalone themed **SVG**
   - **Mermaid** (paste into PRs, Confluence or Markdown)

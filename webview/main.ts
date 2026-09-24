@@ -2,6 +2,7 @@ import type { GraphIssue, GraphLink, GraphModel, GraphSource, HostMessage, LinkC
 import { UI_ICONS } from './icons';
 import { GROUP_HEADER, layout, LayoutEdge, LayoutNode, LayoutResult, LayoutStrategy, Point } from './layout';
 import { computeLens, fmtAge, hasSprintData, LensId, LensMark, LENSES } from './lens';
+import { BLOCK_LABELS, BLOCK_SEVERITY, BlockState, isBlocking, linkBlockState, normalizeStageOverrides, Stage, STAGE_LABELS, stageOf, worse } from '../src/shared/stages';
 import { dashArray, ICONS, iconMarkup, LINK_LABELS, PRIORITY, TypeStyle, TypeStyles } from './typeStyles';
 import cssText from './styles.css';
 import { descriptionBlock, DescriptionState, fitDescription, HoverCard } from './hovercard';
@@ -73,6 +74,8 @@ let childrenOf = new Map<string, string[]>();
 let lay: LayoutResult | undefined;
 let visible: { issues: GraphIssue[]; links: GraphLink[] } = { issues: [], links: [] };
 let selected: string | undefined;
+/** Details panel open: it then follows the selection until closed. Selecting alone never opens it. */
+let detailsOpen = false;
 let focus: { key: string; hops: number } | undefined;
 let highlight: Set<string> | undefined;
 const hiddenKeys = new Set<string>();
@@ -81,6 +84,12 @@ let searchText = '';
 let matches: string[] = [];
 let matchIdx = -1;
 let blocked = new Set<string>();
+/** Worst still-blocking state per blocked ticket (colours its badge). */
+let blockedBy = new Map<string, BlockState>();
+/** Block state per visible link id (including aggregated links). */
+let linkStates = new Map<string, BlockState>();
+let stageOverrides: Record<string, Stage> = {};
+const stageOfIssue = (i: GraphIssue): Stage => stageOf(i, stageOverrides);
 let cycleEdges = new Set<string>();
 let cycles: string[][] = [];
 /** Status counts of all descendants, for the progress bar on parents. */
@@ -159,6 +168,11 @@ app.innerHTML = `
   <section class="legend"></section>
   <canvas class="minimap" width="200" height="130" data-tip="Minimap" data-tip-desc="Click or drag to move the view"></canvas>
   <aside class="drawer"></aside>
+  <div class="nodebar" role="toolbar" aria-label="Ticket actions">
+    <button data-nb="details" data-tip="Details" data-kbd="Enter" data-tip-desc="Open the details panel; it then follows your selection">${UI_ICONS.info}</button>
+    <button data-nb="jira" data-tip="Open in Jira" data-kbd="⌘/Ctrl Enter" data-tip-desc="Also: double-click the ticket">${UI_ICONS.open}</button>
+    <button data-nb="more" data-tip="More actions" data-tip-desc="Also: right-click the ticket">${UI_ICONS.more}</button>
+  </div>
   <div class="drawer-resizer" role="separator" aria-orientation="vertical" aria-label="Resize details panel" tabindex="0" data-tip="Resize details panel" data-tip-desc="Drag to resize · double-click to reset\nArrow keys when focused (Shift: faster)"></div>
   <div class="overlay"></div>
   <div class="menu" role="menu"></div>
@@ -202,6 +216,75 @@ function needsDescription(key: string): boolean {
   return 'error' in cur && Date.now() - (descFailedAt.get(key) ?? 0) > DESC_RETRY_MS;
 }
 
+/** Small action bar above a hovered ticket's top-right corner: Details · Open in Jira · More. */
+const nodebar = (() => {
+  const el = app.querySelector<HTMLElement>('.nodebar')!;
+  let key: string | undefined;
+  let showTimer = 0;
+  let hideTimer = 0;
+  const SHOW_MS = 150;
+  const GRACE_MS = 220;
+  const anchorOf = (k: string) => nodeEls.get(k)?.querySelector('.g-card, .g-group-head') ?? nodeEls.get(k);
+  const place = () => {
+    const a = key ? anchorOf(key) : undefined;
+    if (!a) return hide();
+    const r = a.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const left = Math.min(s.width - w - 6, Math.max(6, r.right - s.left - w));
+    const top = r.top - s.top - h - 4 < 4 ? r.top - s.top + 4 : r.top - s.top - h - 4;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  };
+  function hide() {
+    clearTimeout(showTimer);
+    clearTimeout(hideTimer);
+    el.classList.remove('open');
+    key = undefined;
+  }
+  el.addEventListener('pointerenter', () => clearTimeout(hideTimer));
+  el.addEventListener('pointerleave', () => {
+    clearTimeout(hideTimer);
+    hideTimer = window.setTimeout(hide, GRACE_MS);
+  });
+  el.addEventListener('pointerdown', (e) => e.stopPropagation());
+  el.addEventListener('click', (e) => {
+    const b = (e.target as Element).closest<HTMLButtonElement>('[data-nb]');
+    if (!b || !key) return;
+    const k = key;
+    const r = b.getBoundingClientRect();
+    hide();
+    card.hide();
+    if (b.dataset.nb === 'details') openDetails(k);
+    if (b.dataset.nb === 'jira') post({ type: 'openIssue', key: k });
+    if (b.dataset.nb === 'more') {
+      select(k);
+      showMenu(k, r.left, r.bottom + 4);
+      e.stopPropagation();
+    }
+  });
+  return {
+    enter(k: string) {
+      clearTimeout(hideTimer);
+      if (k === key && el.classList.contains('open')) return;
+      clearTimeout(showTimer);
+      showTimer = window.setTimeout(() => {
+        key = k;
+        el.classList.add('open');
+        place();
+      }, el.classList.contains('open') ? 0 : SHOW_MS);
+    },
+    leave() {
+      clearTimeout(showTimer);
+      clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(hide, GRACE_MS);
+    },
+    hide,
+    place,
+  };
+})();
+
 function requestDescription(key: string, force = false) {
   if (!force && !needsDescription(key)) return;
   const reqId = ++descSeq;
@@ -222,6 +305,13 @@ const card = new HoverCard(stage, {
   childrenOf: (k) => childrenOf.get(k) ?? [],
   rollup: (k) => rollups.get(k),
   blocked: (k) => blocked.has(k),
+  blockerSummary: (k) => blockerSummary(k),
+  blockState: (k) => blockedBy.get(k),
+  linkState: (from, to) => {
+    const l = model?.links.find((x) => x.category === 'blocks' && x.from === from && x.to === to);
+    return l ? linkBlockState(l, byKey, stageOverrides) : undefined;
+  },
+  stageLabel: (i) => STAGE_LABELS[stageOfIssue(i)],
   lens: (k) => lensMarks.get(k),
   lensLabel: () => ((ui.lens ?? 'none') === 'none' ? undefined : LENSES[ui.lens!].label),
   chain: (k) => chainOf(k, model?.links ?? []),
@@ -267,6 +357,10 @@ const EDGE_KINDS: (LinkCategory | 'hierarchy')[] = ['hierarchy', 'blocks', 'rela
     m.setAttribute('markerHeight', k === 'hierarchy' ? '9' : '11');
     el('path', { d: k === 'hierarchy' ? 'M1,1.5 L9,5 L1,8.5' : 'M0,0 L10,5 L0,10 z', class: `mk k-${k}` }, m);
   }
+  for (const st of BLOCK_SEVERITY) {
+    const m = el('marker', { id: `m-b-${st}`, viewBox: '0 0 10 10', refX: 8.5, refY: 5, markerWidth: 11, markerHeight: 11, orient: 'auto-start-reverse', markerUnits: 'userSpaceOnUse' }, defs);
+    el('path', { d: st === 'resolved' ? 'M1,1.5 L9,5 L1,8.5' : 'M0,0 L10,5 L0,10 z', class: `mk b-${st}` }, m);
+  }
   const hatch = el('pattern', { id: 'stub-hatch', width: 8, height: 8, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
   el('rect', { width: 8, height: 8, class: 'hatch-bg' }, hatch);
   el('line', { x1: 0, y1: 0, x2: 0, y2: 8, class: 'hatch-line' }, hatch);
@@ -283,10 +377,13 @@ function indexModel(m: GraphModel) {
     }
   }
   blocked = new Set();
+  blockedBy = new Map();
   for (const l of m.links) {
-    const a = byKey.get(l.from);
-    const b = byKey.get(l.to);
-    if (l.category === 'blocks' && a && b && a.statusCategory !== 'done' && b.statusCategory !== 'done') blocked.add(l.to);
+    const st = linkBlockState(l, byKey, stageOverrides);
+    if (st && isBlocking(st)) {
+      blocked.add(l.to);
+      blockedBy.set(l.to, worse(blockedBy.get(l.to), st));
+    }
   }
   ({ cycles, cycleEdges } = findCycles(m.links.filter((l) => l.category === 'blocks')));
   rollups = new Map();
@@ -392,19 +489,24 @@ function computeVisible() {
   };
   const issues = model.issues.filter((i) => shown.has(i.key) && rep(i.key) === i.key);
   const links = new Map<string, GraphLink>();
+  linkStates = new Map();
   for (const l of model.links) {
     if (ui.hiddenLinks.includes(l.category)) continue;
     const from = rep(l.from);
     const to = rep(l.to);
     if (!from || !to || from === to) continue;
+    const st = linkBlockState(l, byKey, stageOverrides);
     if (from === l.from && to === l.to) {
       links.set(l.id, l);
+      if (st) linkStates.set(l.id, st);
       continue;
     }
     const id = `agg:${from}>${to}:${l.category}`;
     const prev = links.get(id);
     const n = prev ? Number(/×(\d+)$/.exec(prev.label)?.[1] ?? 1) + 1 : 1;
     links.set(id, { ...l, id, from, to, label: n > 1 ? `${l.label} ×${n}` : l.label });
+    // A merged link shows its most severe member.
+    if (st) linkStates.set(id, worse(linkStates.get(id), st));
   }
   return { issues, links: [...links.values()] };
 }
@@ -435,6 +537,7 @@ async function relayout(opts: { fit?: boolean } = {}) {
   }
   if (token !== layoutToken) return;
   card.hide();
+  nodebar.hide();
   lay = result;
   render();
   renderLegend();
@@ -619,7 +722,7 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
 
   // Badges
   if (blocked.has(i.key)) {
-    const b = el('g', { class: 'g-badge blocked', transform: `translate(${w - 2} -2)` }, g);
+    const b = el('g', { class: `g-badge blocked b-${blockedBy.get(i.key) ?? 'todo'}`, transform: `translate(${w - 2} -2)` }, g);
     el('circle', { r: 9 }, b);
     el('rect', { x: -4.5, y: -1.4, width: 9, height: 2.8, rx: 1 }, b);
   }
@@ -648,14 +751,21 @@ function drawNode(g: SVGGElement, i: GraphIssue, n: LayoutNode) {
 
 function drawEdge(e: LayoutEdge) {
   const d = e.spline ? splinePath(e.points) : roundedPath(e.points, 8);
-  const g = el('g', { class: `g-edge k-${e.kind}${cycleEdges.has(e.id) ? ' cycle' : ''}${e.id.startsWith('l:agg:') ? ' agg' : ''}`, 'data-from': e.from, 'data-to': e.to }, layers.edges);
+  const bst = e.kind === 'blocks' ? edgeBlockState(e) : undefined;
+  const g = el('g', { class: `g-edge k-${e.kind}${bst ? ` b-${bst}` : ''}${cycleEdges.has(e.id) ? ' cycle' : ''}${e.id.startsWith('l:agg:') ? ' agg' : ''}`, 'data-from': e.from, 'data-to': e.to }, layers.edges);
   el('path', { class: 'hit', d }, g);
-  el('path', { class: 'line', d, 'marker-end': e.kind === 'relates' ? undefined : `url(#m-${e.kind})` }, g);
+  el('path', { class: 'line', d, 'marker-end': e.kind === 'relates' ? undefined : bst ? `url(#m-b-${bst})` : `url(#m-${e.kind})` }, g);
   const nm = (k: string) => (k.startsWith('__fan:') ? `${lay?.frames.find((f) => f.id === k)?.members?.length ?? ''} tickets` : k);
   const summ = (k: string) => byKey.get(k)?.summary ?? '';
   const head = e.kind !== 'hierarchy' ? `${nm(e.from)} ${e.label} ${nm(e.to)}` : e.to.startsWith('__grid:') ? `${e.from} → its packed children` : `${e.from} is parent of ${e.to}`;
-  g.setAttribute('data-tip', head);
-  const desc = [summ(e.from) && `${e.from}: ${summ(e.from)}`, summ(e.to) && `${e.to}: ${summ(e.to)}`].filter(Boolean).join('\n');
+  g.setAttribute('data-tip', bst === 'critical' ? `⚠ ${head}` : head);
+  const blocker = byKey.get(e.from);
+  const since = blocker?.statusChangedAt ? ` · ${fmtAge((Date.now() - Date.parse(blocker.statusChangedAt)) / 86_400_000)} in status` : '';
+  const desc = [
+    bst && `${BLOCK_LABELS[bst]}${blocker && !e.from.startsWith('__') ? ` — ${blocker.status}${since}` : ''}`,
+    summ(e.from) && `${e.from}: ${summ(e.from)}`,
+    summ(e.to) && `${e.to}: ${summ(e.to)}`,
+  ].filter(Boolean).join('\n');
   if (desc) g.setAttribute('data-tip-desc', desc);
   if (e.labelPos && e.label) {
     const lw = measure(e.label) + 10;
@@ -663,6 +773,22 @@ function drawEdge(e: LayoutEdge) {
     el('rect', { x: -lw / 2, y: -8, width: lw, height: 16, rx: 8 }, lg);
     el('text', { y: 3.8 }, lg).textContent = e.label;
   }
+}
+
+/** Block state of a drawn edge: the link's own, or the worst member of a fan cluster. */
+function edgeBlockState(e: LayoutEdge): BlockState | undefined {
+  const own = linkStates.get(e.id.replace(/^l:/, ''));
+  if (own) return own;
+  const fanId = e.from.startsWith('__fan:') ? e.from : e.to.startsWith('__fan:') ? e.to : undefined;
+  const members = fanId ? new Set(lay?.frames.find((f) => f.id === fanId)?.members) : undefined;
+  if (!members) return undefined;
+  let st: BlockState | undefined;
+  for (const l of visible.links) {
+    if (l.category !== 'blocks' || !(members.has(l.from) || members.has(l.to))) continue;
+    const s1 = linkStates.get(l.id);
+    if (s1) st = worse(st, s1);
+  }
+  return st;
 }
 
 function roundedPath(p: Point[], r: number): string {
@@ -789,8 +915,19 @@ function applyClasses() {
   svg.classList.toggle('spotlight', !!spot);
 }
 
+function openDetails(key: string) {
+  detailsOpen = true;
+  select(key);
+}
+
+function closeDetails() {
+  detailsOpen = false;
+  renderDrawer();
+}
+
 function select(key: string | undefined, opts: { center?: boolean; notify?: boolean } = {}) {
   if (key !== selected) drawerDescExpanded = false;
+  if (!key) detailsOpen = false;
   selected = key;
   if (key && card.openKey === key) card.hide();
   applyClasses();
@@ -888,6 +1025,7 @@ svg.addEventListener('pointermove', (e) => {
     // Capture only once it is a drag: capturing on press would retarget the click away from the ticket.
     pan.moved = true;
     card.hide();
+    nodebar.hide();
     tips.suppress(true);
     svg.setPointerCapture(e.pointerId);
     svg.classList.add('panning');
@@ -914,6 +1052,7 @@ svg.addEventListener('pointercancel', endPan);
 svg.addEventListener('wheel', (e) => {
   e.preventDefault();
   card.hide();
+  nodebar.hide();
   anim++;
   // Scroll (and pinch) zooms around the cursor; Shift+scroll pans.
   if (e.shiftKey) {
@@ -965,14 +1104,17 @@ svg.addEventListener('pointerover', (e) => {
   }
   // Ticket card: not over a container's body, not while dragging, not for the ticket already in the drawer.
   const onGroupBody = (e.target as Element).classList?.contains('g-group-bg');
-  const inDrawer = key === selected && stage.classList.contains('drawer-open');
+  const inDrawer = key === selected && detailsOpen;
   if (key && !onGroupBody && !inDrawer && !pan && !menu.classList.contains('open')) card.enter(key);
   else card.leave();
+  if (key && !onGroupBody && !pan) nodebar.enter(key);
+  else nodebar.leave();
 });
 svg.addEventListener('pointerleave', () => {
   hovered = undefined;
   applyClasses();
   card.leave();
+  nodebar.leave();
 });
 
 function toggleCollapse(key: string) {
@@ -988,6 +1130,7 @@ function issueActions(key: string): MenuItem[] {
   const i = byKey.get(key)!;
   const kids = childrenOf.get(key)?.length ?? 0;
   const items: MenuItem[] = [
+    { label: 'Show details', icon: UI_ICONS.info, hint: 'Enter', run: () => openDetails(key) },
     { label: 'Open in Jira', icon: UI_ICONS.open, hint: 'dbl-click', run: () => post({ type: 'openIssue', key }) },
     { label: i.loaded ? 'Load more relations' : 'Load issue & relations', icon: UI_ICONS.plus, hint: 'E', run: () => post({ type: 'expand', keys: [key] }) },
     'sep',
@@ -1096,6 +1239,25 @@ resizer.addEventListener('keydown', (e) => {
 // Keep the drawer within bounds when the panel shrinks.
 window.addEventListener('resize', () => setDrawerWidth(ui.drawerWidth ?? DRAWER_DEFAULT));
 
+/** Open blockers of a ticket, worst first, as "Blocked by PLAT-7 (In Progress), SHOP-23 (Ready for Testing)". */
+function blockers(key: string): { issue: GraphIssue; state: BlockState }[] {
+  const out: { issue: GraphIssue; state: BlockState }[] = [];
+  for (const l of model?.links ?? []) {
+    if (l.to !== key || l.category !== 'blocks') continue;
+    const st = linkBlockState(l, byKey, stageOverrides);
+    const b = byKey.get(l.from);
+    if (st && b && isBlocking(st)) out.push({ issue: b, state: st });
+  }
+  return out.sort((a, b) => BLOCK_SEVERITY.indexOf(a.state) - BLOCK_SEVERITY.indexOf(b.state));
+}
+
+function blockerSummary(key: string): string {
+  const list = blockers(key);
+  if (!list.length) return 'Blocked by an unresolved issue';
+  const lead = list[0].state === 'critical' ? 'Work started, but blocked by ' : 'Blocked by ';
+  return lead + list.map((x) => `${x.issue.key} (${x.issue.status})`).join(', ');
+}
+
 function chainSummary(key: string): string {
   if (!model) return '';
   const { up, down } = chainOf(key, model.links);
@@ -1109,7 +1271,7 @@ function chainSummary(key: string): string {
 }
 
 function renderDrawer() {
-  const i = selected ? byKey.get(selected) : undefined;
+  const i = detailsOpen && selected ? byKey.get(selected) : undefined;
   stage.classList.toggle('drawer-open', !!i);
   if (!i || !model) {
     drawer.innerHTML = '';
@@ -1143,7 +1305,7 @@ function renderDrawer() {
     <h3 class="d-summary">${esc(i.summary || '(not loaded)')}</h3>
     ${chainSummary(i.key)}
     ${i.loaded ? descriptionBlock(descriptions.get(i.key), descriptionLines, drawerDescExpanded) : ''}
-    ${blocked.has(i.key) ? `<div class="d-alert">${UI_ICONS.warn}<span>Blocked by an unresolved issue</span></div>` : ''}
+    ${blocked.has(i.key) ? `<div class="d-alert b-${blockedBy.get(i.key)}">${UI_ICONS.warn}<span>${esc(blockerSummary(i.key))}</span></div>` : ''}
     <dl class="d-grid">
       <dt>Status</dt><dd><span class="pill st-${i.statusCategory}">${esc(i.status || '—')}</span></dd>
       ${lensMarks.get(i.key)?.badges.length ? `<dt>${esc(LENSES[ui.lens ?? 'none'].label)}</dt><dd>${lensMarks.get(i.key)!.badges.map((b) => `<span class="lbadge tone-${b.tone}" title="${esc(b.title)}">${esc(b.text)}</span> <small>${esc(b.title)}</small>`).join('<br/>')}</dd>` : ''}
@@ -1181,7 +1343,7 @@ function renderDrawer() {
       post({ type: 'openUrl', url: a.dataset.url! });
     }),
   );
-  drawer.querySelector('.d-close')!.addEventListener('click', () => select(undefined));
+  drawer.querySelector('.d-close')!.addEventListener('click', () => closeDetails());
   drawer.querySelector('[data-open]')!.addEventListener('click', (e) => {
     e.preventDefault();
     post({ type: 'openIssue', key: i.key });
@@ -1265,6 +1427,18 @@ function lensLegend(): string {
   return `<h5>Lens · ${esc(info.label)}</h5><p class="lens-hint">${esc(info.hint)}</p>${info.legend.map(row).join('')}`;
 }
 
+function stateDesc(st: BlockState): string {
+  const stages = (want: Stage) => [...new Set((model?.issues ?? []).filter((i) => stageOfIssue(i) === want).map((i) => i.status))].join(', ') || '—';
+  switch (st) {
+    case 'critical': return 'Thick pulsing red: the blocked ticket is already in progress while its blocker has not started.';
+    case 'todo': return `Solid red. Blocker statuses: ${stages('todo')}`;
+    case 'dev': return `Orange, dashes flowing. Blocker statuses: ${stages('dev')}`;
+    case 'test': return `Amber, dots flowing slowly. Blocker statuses: ${stages('test')}`;
+    case 'stale': return 'Grey dashed: the blocked ticket is done although its blocker is still open.';
+    case 'resolved': return 'Thin faded green: the blocker is done.';
+  }
+}
+
 function renderLegend() {
   if (!model) return;
   const types = new Map<string, { style: TypeStyle; count: number }>();
@@ -1302,6 +1476,20 @@ function renderLegend() {
     if (!c) continue;
     const off = ui.hiddenLinks.includes(k);
     rows.push(`<button class="row${off ? ' off' : ''}" data-link="${k}" data-tip="${LINK_LABELS[k]} · ${c}" data-tip-desc="Click to ${off ? 'show' : 'hide'} these links">${lineSample(k)}<span>${LINK_LABELS[k]}</span><em>${c}</em></button>`);
+    if (k === 'blocks' && !off) {
+      // Break blocking links down by blocker state (the colour and line style on the graph).
+      const byState = new Map<BlockState, number>();
+      for (const l of model.links) {
+        const st = linkBlockState(l, byKey, stageOverrides);
+        if (st) byState.set(st, (byState.get(st) ?? 0) + 1);
+      }
+      const short: Record<BlockState, string> = { critical: '⚠ started, blocker not', todo: 'not started', dev: 'in development', test: 'in testing', stale: 'blocked one done', resolved: 'resolved' };
+      for (const st of BLOCK_SEVERITY) {
+        const n = byState.get(st);
+        if (!n) continue;
+        rows.push(`<div class="row sub" data-tip="${esc(BLOCK_LABELS[st])}" data-tip-desc="${esc(stateDesc(st))}"><svg width="26" height="12" viewBox="0 0 26 12" class="g-edge k-blocks b-${st}"><path class="line" d="M2 6 H20" marker-end="url(#m-b-${st})"/></svg><span>${esc(short[st])}</span><em>${n}</em></div>`);
+      }
+    }
   }
 
   legend.classList.toggle('collapsed', !ui.legendOpen);
@@ -1314,7 +1502,7 @@ function renderLegend() {
       <h5>Status</h5>
       <div class="statuses"><span class="pill st-new" data-tip="To do" data-tip-desc="Status category “To Do”: grey stripe and pill">To do</span><span class="pill st-indeterminate" data-tip="In progress" data-tip-desc="Any in-progress status (In Progress, In Review, …): blue stripe and tint">In progress</span><span class="pill st-done" data-tip="Done" data-tip-desc="Status category “Done”: green stripe, key struck through">Done</span></div>
       <div class="badges"><span data-tip="Blocked" data-tip-desc="Red badge: an open ticket blocks this open ticket"><span class="badge-blocked"></span> blocked</span> <span data-tip="Not loaded" data-tip-desc="Hatched card: found through a relation; press + or double-click to load"><span class="badge-stub"></span> not loaded</span></div>
-      <p class="help">Scroll / pinch to zoom · drag anywhere or Shift+scroll to pan · <kbd>L</kbd> lens · double-click opens · right-click for actions · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
+      <p class="help">Click selects · <kbd>Enter</kbd> or ⓘ details · double-click opens Jira · right-click for actions · scroll / pinch to zoom · drag to pan · <kbd>L</kbd> lens · <kbd>/</kbd> search · <kbd>F</kbd> fit · arrows move selection</p>
     </div>`;
   legend.querySelector('.legend-head')!.addEventListener('click', () => {
     ui.legendOpen = !ui.legendOpen;
@@ -1679,7 +1867,9 @@ document.addEventListener('keydown', (e) => {
   else if ((e.key === 'i' || e.key === 'I') && (hovered ?? selected)) card.toggleNow((hovered ?? selected)!);
   else if (e.key === 'Escape') {
     hideMenu();
-    if (highlight) (highlight = undefined), applyClasses();
+    nodebar.hide();
+    if (detailsOpen) closeDetails();
+    else if (highlight) (highlight = undefined), applyClasses();
     else if (selected) select(undefined);
     else if (focus) setFocus(undefined);
   } else if (e.key === 'l' || e.key === 'L') {
@@ -1687,7 +1877,8 @@ document.addEventListener('keydown', (e) => {
     setLens(LENS_ORDER[(cur + (e.shiftKey ? LENS_ORDER.length - 1 : 1)) % LENS_ORDER.length]);
   } else if (selected && (e.key === 'e' || e.key === 'E')) post({ type: 'expand', keys: [selected] });
   else if (selected && (e.key === 'h' || e.key === 'H')) hideKey(selected);
-  else if (selected && e.key === 'Enter') post({ type: 'openIssue', key: selected });
+  else if (selected && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) post({ type: 'openIssue', key: selected });
+  else if (selected && e.key === 'Enter') openDetails(selected);
   else if (selected && e.key === ' ') {
     e.preventDefault();
     if (childrenOf.has(selected)) toggleCollapse(selected);
@@ -1980,6 +2171,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       card.enabled = m.options.hover?.enabled ?? true;
       card.delayMs = m.options.hover?.delayMs ?? 1000;
       descriptionLines = m.options.hover?.descriptionLines ?? 4;
+      stageOverrides = normalizeStageOverrides(m.options.statusStages);
       if (uiFromHost) {
         ui.direction = m.options.direction;
         ui.mode = m.options.hierarchyMode;

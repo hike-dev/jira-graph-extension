@@ -75,6 +75,8 @@ export interface ViewOptions {
   edgeRouting: 'ORTHOGONAL' | 'SPLINES' | 'POLYLINE';
   typeStyles: Record<string, TypeStyleOverride>;
   hover?: { enabled: boolean; delayMs: number; descriptionLines: number };
+  /** Status name → workflow stage overrides (todo | dev | test | done). */
+  statusStages?: Record<string, string>;
 }
 
 export type HostMessage =
