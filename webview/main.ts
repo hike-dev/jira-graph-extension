@@ -1756,7 +1756,8 @@ minimap.addEventListener('pointerup', () => (mmDrag = false));
 
 // ── Toolbar ─────────────────────────────────────────────────────────────────
 function syncToolbar() {
-  app.querySelectorAll<HTMLElement>('.seg').forEach((seg) => {
+  // Only the toolbar's own segments: popups (scope panel) render theirs from their own state.
+  app.querySelectorAll<HTMLElement>('.seg[data-opt]').forEach((seg) => {
     const opt = seg.dataset.opt as 'mode' | 'direction';
     seg.querySelectorAll<HTMLButtonElement>('button').forEach((b) => b.classList.toggle('on', b.dataset.v === ui[opt]));
   });
