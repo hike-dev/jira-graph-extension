@@ -4,7 +4,7 @@ import { JiraError } from '../jira/client';
 import { fingerprint, GraphCache } from '../jira/cache';
 import { GraphSession, SessionSnapshot, SyncResult } from '../jira/graphSession';
 import { SyncScheduler } from '../sync/scheduler';
-import { IssueSource } from '../jira/types';
+import { IssueSource, IssueTransition, SprintOption } from '../jira/types';
 import { toMermaid } from '../mermaid';
 import { GraphModel, GraphSource, HostMessage, WebviewMessage } from '../shared/model';
 
@@ -338,6 +338,12 @@ export class GraphPanel {
         await this.reload();
         break;
       }
+      case 'changeStatus':
+        await this.changeStatus(m.key);
+        break;
+      case 'changeSprint':
+        await this.changeSprint(m.key);
+        break;
       case 'describe':
         await this.describe(m.key, m.reqId);
         break;
@@ -381,6 +387,104 @@ export class GraphPanel {
         break;
       }
     }
+  }
+
+  // ── Edits ─────────────────────────────────────────────────────────────────
+  private issue(key: string) {
+    return this.model?.issues.find((i) => i.key === key && i.loaded);
+  }
+
+  /** Pick one of the issue's transitions and apply it. */
+  async changeStatus(key: string) {
+    const src = this.session?.issues;
+    const issue = this.issue(key);
+    if (!src?.transitions || !src.transition || !issue) return;
+    let list: IssueTransition[];
+    try {
+      list = await this.progress(`Loading transitions for ${key}…`, () => src.transitions!(key));
+    } catch (e) {
+      return this.editFailed(key, e);
+    }
+    if (!list.length) {
+      vscode.window.showInformationMessage(`${key} has no transitions you can make from “${issue.status}”.`);
+      return;
+    }
+    const icon: Record<string, string> = { new: '$(circle-large-outline)', indeterminate: '$(circle-large-filled)', done: '$(pass-filled)' };
+    const pick = await vscode.window.showQuickPick(
+      list.map((t) => ({
+        label: `${icon[t.to.category] ?? icon.new} ${t.name}`,
+        description: t.name.toLowerCase() === t.to.name.toLowerCase() ? undefined : `→ ${t.to.name}`,
+        t,
+      })),
+      { title: `${key}: ${issue.summary}`, placeHolder: `Status: ${issue.status} — move to…` },
+    );
+    if (!pick) return;
+    await this.edit(key, `${key} → ${pick.t.to.name}`, () => src.transition!(key, pick.t.id));
+  }
+
+  /** Pick an active or future sprint (or the backlog) and move the issue there. */
+  async changeSprint(key: string) {
+    const src = this.session?.issues;
+    const issue = this.issue(key);
+    if (!src?.sprints || !src.moveToSprint || !issue) return;
+    if (issue.isSubtask) {
+      vscode.window.showInformationMessage(`${key} is a sub-task: it follows the sprint of its parent${issue.parentKey ? ` ${issue.parentKey}` : ''}.`);
+      return;
+    }
+    let list: SprintOption[];
+    try {
+      list = await this.progress(`Loading sprints for ${key}…`, () => src.sprints!(key));
+    } catch (e) {
+      return this.editFailed(key, e);
+    }
+    const current = issue.sprints?.find((s) => s.state !== 'closed')?.name;
+    const boards = new Set(list.map((s) => s.board)).size;
+    type Item = vscode.QuickPickItem & { sprint?: SprintOption; backlog?: boolean };
+    const items: Item[] = [...list]
+      .sort((a, b) => (a.state === b.state ? 0 : a.state === 'active' ? -1 : 1))
+      .map((sp) => ({
+        label: `${sp.state === 'active' ? '$(play-circle)' : '$(calendar)'} ${sp.name}`,
+        description: [sp.state, sp.name === current ? 'current' : ''].filter(Boolean).join(' · '),
+        detail: boards > 1 ? sp.board : undefined,
+        sprint: sp,
+      }));
+    items.push({ label: '', kind: vscode.QuickPickItemKind.Separator }, { label: '$(archive) Backlog', description: current ? 'remove from the sprint' : 'current', backlog: true });
+    const pick = await vscode.window.showQuickPick(items, {
+      title: `${key}: ${issue.summary}`,
+      placeHolder: `${current ? `Sprint: ${current}` : 'In the backlog'} — move to…${list.length ? '' : ' (no active or future sprints found on the project boards)'}`,
+    });
+    if (!pick || (pick.backlog ? !current : pick.sprint?.name === current)) return;
+    const target = pick.sprint;
+    await this.edit(key, `${key} → ${target ? target.name : 'Backlog'}`, () => src.moveToSprint!(key, target?.id));
+  }
+
+  private progress<T>(title: string, task: () => Promise<T>): Promise<T> {
+    return Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title }, task));
+  }
+
+  /** Write to Jira, then re-read the issue and redraw it in place. */
+  private async edit(key: string, done: string, write: () => Promise<void>) {
+    try {
+      await this.progress(`Jira: ${done}…`, write);
+    } catch (e) {
+      return this.editFailed(key, e);
+    }
+    this.scheduler?.activity();
+    try {
+      const changed = await this.progress(`Jira: refreshing ${key}…`, () => this.session!.refresh([key]));
+      if (!changed.length) return;
+      this.model = this.session!.toModel();
+      this.post({ type: 'graph', model: this.model, options: viewOptions(), reason: 'sync', diff: { changed, added: [], removed: [], renamed: [] }, note: done });
+      GraphPanel.modelEmitter.fire(this);
+      this.scheduleSave(true);
+    } catch {
+      this.syncNow(); // the write went through; the next sync picks it up
+    }
+  }
+
+  private async editFailed(key: string, e: unknown) {
+    const pick = await vscode.window.showErrorMessage(`Could not update ${key}: ${(e as Error).message}`, 'Open in Jira');
+    if (pick) void vscode.commands.executeCommand('jiraGraph.openInBrowser', key);
   }
 
   /** Descriptions are fetched on demand and cached until the issue's `updated` changes. */

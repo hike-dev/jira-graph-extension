@@ -318,6 +318,11 @@ body.vscode-light .chain-down-chip { color: #00718a; }
 .help { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 8px 2px 0; }
 
 .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+.pill-edit { border: 0; cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; gap: 4px; }
+.pill-edit:hover, .pill-edit:focus-visible { filter: brightness(1.15); outline: 1px solid var(--accent); outline-offset: 1px; }
+.pill-edit .caret { font-size: 9px; opacity: 0.8; }
+.d-edit { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 3px; background: none; color: var(--fg); cursor: pointer; font-size: 11px; }
+.d-edit:hover { border-color: var(--accent); background: var(--hover); }
 
 /* ── Minimap ─────────────────────────────────────────────────────────── */
 .minimap {

@@ -1,4 +1,4 @@
-import { IssueSource, RawIssue, RawIssueLink, RawIssueRef, SearchPage } from './types';
+import { IssueSource, IssueTransition, RawIssue, RawIssueLink, RawIssueRef, SearchPage, SprintOption } from './types';
 
 // Offline demo dataset: lets people explore the graph without Jira credentials.
 
@@ -83,9 +83,20 @@ const LINKS: [string, keyof typeof LINK_TYPES, string][] = [
 ];
 
 const DAY = 86_400_000;
-const SPRINT_OLD = { name: 'SHOP Sprint 13', state: 'closed' };
-const SPRINT_NOW = { name: 'SHOP Sprint 14', state: 'active' };
-const SPRINT_NEXT = { name: 'SHOP Sprint 15', state: 'future' };
+const SPRINT_OLD = { id: 13, name: 'SHOP Sprint 13', state: 'closed' };
+const SPRINT_NOW = { id: 14, name: 'SHOP Sprint 14', state: 'active' };
+const SPRINT_NEXT = { id: 15, name: 'SHOP Sprint 15', state: 'future' };
+const SPRINT_LATER = { id: 16, name: 'SHOP Sprint 16', state: 'future' };
+const OPEN_SPRINTS = [SPRINT_NOW, SPRINT_NEXT, SPRINT_LATER];
+
+/** Demo workflow: status → the statuses it can move to. */
+const WORKFLOW: Record<string, [string, Cat][]> = {
+  'To Do': [PROG],
+  'In Progress': [REVIEW, TODO],
+  'In Review': [TESTING, PROG],
+  'Ready for Testing': [DONE, PROG],
+  Done: [TODO],
+};
 
 /** Days since the last status-category change, and sprint history, per demo issue. */
 const PLAN: Record<string, { days: number; sprints?: object[] }> = {
@@ -242,6 +253,53 @@ export class DemoSource implements IssueSource {
   async presence(ids: string[]): Promise<Map<string, string>> {
     const wanted = new Set(ids);
     return new Map([...this.issues.values()].filter((i) => wanted.has(i.id)).map((i) => [i.id, i.key]));
+  }
+
+  async issue(key: string): Promise<RawIssue> {
+    const [i] = await this.match(`key in (${key})`);
+    if (!i) throw new Error(`${key} not found`);
+    return i;
+  }
+
+  // ── Writes ────────────────────────────────────────────────────────────────
+
+  async transitions(key: string): Promise<IssueTransition[]> {
+    const i = this.get(key);
+    return (WORKFLOW[i.fields.status?.name ?? ''] ?? [TODO]).map(([name, category], idx) => ({ id: String(idx), name: category === 'done' ? 'Done' : name, to: { name, category } }));
+  }
+
+  async transition(key: string, transitionId: string): Promise<void> {
+    await new Promise((r) => setTimeout(r, 200));
+    const i = this.get(key);
+    const t = (await this.transitions(key))[Number(transitionId)];
+    if (!t) throw new Error(`Transition ${transitionId} is not available for ${key}`);
+    const was = i.fields.status?.statusCategory?.key;
+    i.fields.status = { name: t.to.name, statusCategory: { key: t.to.category } };
+    if (was !== t.to.category) i.fields.statuscategorychangedate = new Date().toISOString();
+    i.fields.resolutiondate = t.to.category === 'done' ? new Date().toISOString() : null;
+    this.touch(i);
+  }
+
+  async sprints(): Promise<SprintOption[]> {
+    return OPEN_SPRINTS.map((s) => ({ id: s.id, name: s.name, state: s.state as 'active' | 'future', board: 'SHOP board' }));
+  }
+
+  /** Like Jira: an issue is in at most one open sprint; closed sprints stay in its history. */
+  async moveToSprint(key: string, sprintId: number | undefined): Promise<void> {
+    await new Promise((r) => setTimeout(r, 200));
+    const i = this.get(key);
+    if (i.fields.issuetype?.subtask) throw new Error('Sub-tasks follow the sprint of their parent.');
+    const closed = ((i.fields.customfield_10020 as { state: string }[] | null) ?? []).filter((s) => s.state === 'closed');
+    const target = OPEN_SPRINTS.find((s) => s.id === sprintId);
+    if (sprintId !== undefined && !target) throw new Error(`Sprint ${sprintId} not found`);
+    i.fields.customfield_10020 = [...closed, ...(target ? [target] : [])];
+    this.touch(i);
+  }
+
+  private get(key: string): RawIssue {
+    const i = this.issues.get(key);
+    if (!i) throw new Error(`${key} not found`);
+    return i;
   }
 
   // ── Simulation, so live sync can be tried without Jira ─────────────────────

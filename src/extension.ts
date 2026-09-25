@@ -234,6 +234,16 @@ export function activate(context: vscode.ExtensionContext) {
     if (key) void GraphPanel.active?.expand([key]);
   });
 
+  register('jiraGraph.changeStatus', (arg?: unknown) => {
+    const key = keyArg(arg);
+    if (key) void GraphPanel.active?.changeStatus(key);
+  });
+
+  register('jiraGraph.moveToSprint', (arg?: unknown) => {
+    const key = keyArg(arg);
+    if (key) void GraphPanel.active?.changeSprint(key);
+  });
+
   register('jiraGraph.graphFromIssue', async (arg?: unknown) => {
     const key = keyArg(arg);
     const src = GraphPanel.active?.source;

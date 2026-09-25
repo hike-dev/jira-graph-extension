@@ -1184,11 +1184,16 @@ function issueActions(key: string): MenuItem[] {
     { label: 'Show details', icon: UI_ICONS.info, hint: 'Enter', run: () => openDetails(key) },
     { label: 'Open in Jira', icon: UI_ICONS.open, hint: 'dbl-click', run: () => post({ type: 'openIssue', key }) },
     { label: i.loaded ? 'Load more relations' : 'Load issue & relations', icon: UI_ICONS.plus, hint: 'E', run: () => post({ type: 'expand', keys: [key] }) },
+  ];
+  if (canChangeStatus(i) || canChangeSprint(i)) items.push('sep');
+  if (canChangeStatus(i)) items.push({ label: 'Change status…', icon: UI_ICONS.status, hint: 'S', run: () => post({ type: 'changeStatus', key }) });
+  if (canChangeSprint(i)) items.push({ label: 'Move to sprint…', icon: UI_ICONS.sprint, hint: 'M', run: () => post({ type: 'changeSprint', key }) });
+  items.push(
     'sep',
     { label: 'Focus neighbourhood', icon: UI_ICONS.focus, run: () => setFocus(key, focus?.hops ?? 2) },
     { label: 'Filter to its relations…', icon: UI_ICONS.funnel, run: () => filterPanel.setAnchor(key) },
     { label: 'New graph from here', icon: UI_ICONS.graph, run: () => post({ type: 'graphFrom', key }) },
-  ];
+  );
   if (kids) items.push({ label: collapsed.has(key) ? `Expand ${kids} children` : `Collapse ${kids} children`, icon: collapsed.has(key) ? UI_ICONS.expand : UI_ICONS.collapse, run: () => toggleCollapse(key) });
   items.push(
     'sep',
@@ -1197,6 +1202,15 @@ function issueActions(key: string): MenuItem[] {
     { label: 'Hide', icon: UI_ICONS.hide, hint: 'H', run: () => hideKey(key) },
   );
   return items;
+}
+
+/** Edits need a loaded ticket and a source that can write; sub-tasks follow their parent's sprint. */
+function canChangeStatus(i: GraphIssue): boolean {
+  return i.loaded && !!model?.editable?.status;
+}
+
+function canChangeSprint(i: GraphIssue): boolean {
+  return i.loaded && !i.isSubtask && !!model?.editable?.sprint;
 }
 
 function showMenu(key: string, x: number, y: number) {
@@ -1359,12 +1373,14 @@ function renderDrawer() {
     ${i.loaded ? descriptionBlock(descriptions.get(i.key), descriptionLines, drawerDescExpanded) : ''}
     ${blocked.has(i.key) ? `<div class="d-alert b-${blockedBy.get(i.key)}">${UI_ICONS.warn}<span>${esc(blockerSummary(i.key))}</span></div>` : ''}
     <dl class="d-grid">
-      <dt>Status</dt><dd><span class="pill st-${i.statusCategory}">${esc(i.status || '—')}</span></dd>
+      <dt>Status</dt><dd>${canChangeStatus(i)
+        ? `<button class="pill pill-edit st-${i.statusCategory}" data-act="status" title="Change status (S)">${esc(i.status || '—')}<span class="caret">▾</span></button>`
+        : `<span class="pill st-${i.statusCategory}">${esc(i.status || '—')}</span>`}</dd>
       ${lensMarks.get(i.key)?.badges.length ? `<dt>${esc(LENSES[ui.lens ?? 'none'].label)}</dt><dd>${lensMarks.get(i.key)!.badges.map((b) => `<span class="lbadge tone-${b.tone}" title="${esc(b.title)}">${esc(b.text)}</span> <small>${esc(b.title)}</small>`).join('<br/>')}</dd>` : ''}
       <dt>Priority</dt><dd>${esc(i.priority ?? '—')}</dd>
       ${i.statusChangedAt ? `<dt>In status</dt><dd>${fmtAge((Date.now() - Date.parse(i.statusChangedAt)) / 86_400_000)} (since ${new Date(i.statusChangedAt).toLocaleDateString()})</dd>` : ''}
       ${i.resolvedAt ? `<dt>Resolved</dt><dd>${new Date(i.resolvedAt).toLocaleDateString()}</dd>` : ''}
-      ${i.sprints?.length ? `<dt>Sprints</dt><dd>${i.sprints.map((sp) => `<span class="tag sprint-${sp.state}" title="${sp.state}">${esc(sp.name)}</span>`).join(' ')}</dd>` : ''}
+      ${i.sprints?.length || canChangeSprint(i) ? `<dt>Sprints</dt><dd>${i.sprints?.length ? i.sprints.map((sp) => `<span class="tag sprint-${sp.state}" title="${sp.state}">${esc(sp.name)}</span>`).join(' ') : '<i>Backlog</i>'}${canChangeSprint(i) ? `<button class="d-edit" data-act="sprint" title="Move to another sprint or the backlog (M)">${UI_ICONS.sprint}Move…</button>` : ''}</dd>` : ''}
       ${i.dueDate ? `<dt>Due</dt><dd>${new Date(i.dueDate).toLocaleDateString()}</dd>` : ''}
       ${i.fixVersions?.length ? `<dt>Fix version</dt><dd>${i.fixVersions.map((v) => `<span class="tag">${esc(v)}</span>`).join(' ')}</dd>` : ''}
       <dt>Assignee</dt><dd>${i.assignee ? `<span class="avatar" style="background:${avatarColor(i.assignee)}">${initials(i.assignee)}</span>${esc(i.assignee)}` : '<i>Unassigned</i>'}</dd>
@@ -1410,6 +1426,8 @@ function renderDrawer() {
       if (act === 'expand') post({ type: 'expand', keys: [i.key] });
       if (act === 'focus') setFocus(i.key, focus?.hops ?? 2);
       if (act === 'graph') post({ type: 'graphFrom', key: i.key });
+      if (act === 'status') post({ type: 'changeStatus', key: i.key });
+      if (act === 'sprint') post({ type: 'changeSprint', key: i.key });
     }),
   );
 }
@@ -1919,6 +1937,8 @@ document.addEventListener('keydown', (e) => {
     setLens(LENS_ORDER[(cur + (e.shiftKey ? LENS_ORDER.length - 1 : 1)) % LENS_ORDER.length]);
   } else if (selected && (e.key === 'e' || e.key === 'E')) post({ type: 'expand', keys: [selected] });
   else if (selected && (e.key === 'h' || e.key === 'H')) hideKey(selected);
+  else if (selected && (e.key === 's' || e.key === 'S') && canChangeStatus(byKey.get(selected)!)) post({ type: 'changeStatus', key: selected });
+  else if (selected && (e.key === 'm' || e.key === 'M') && canChangeSprint(byKey.get(selected)!)) post({ type: 'changeSprint', key: selected });
   else if (selected && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) post({ type: 'openIssue', key: selected });
   else if (selected && e.key === 'Enter') openDetails(selected);
   else if (selected && e.key === ' ') {
@@ -2100,7 +2120,7 @@ function registerTips() {
 registerTips();
 
 /** Apply an incremental update: redraw in place when the visible structure is unchanged, otherwise relayout when the user is not interacting. */
-function applySync(next: GraphModel, diff: SyncDiff) {
+function applySync(next: GraphModel, diff: SyncDiff, note?: string) {
   for (const k of [...diff.changed, ...diff.removed, ...diff.renamed.map(([o]) => o)]) {
     descriptions.delete(k);
     descRequests.delete(k);
@@ -2135,7 +2155,8 @@ function applySync(next: GraphModel, diff: SyncDiff) {
     diff.renamed.length ? `${diff.renamed.length} moved` : '',
     diff.removed.length ? `${diff.removed.length} removed (${diff.removed.slice(0, 3).join(', ')}${diff.removed.length > 3 ? '…' : ''})` : '',
   ].filter(Boolean);
-  if (parts.length) toast(`Jira: ${parts.join(' · ')}`);
+  if (note) toast(note);
+  else if (parts.length) toast(`Jira: ${parts.join(' · ')}`);
 
   if (!structural) {
     visible = nv;
@@ -2202,7 +2223,7 @@ window.addEventListener('message', (e: MessageEvent<HostMessage>) => {
       break;
     case 'graph': {
       if (m.reason === 'sync' && model && lay) {
-        applySync(m.model, m.diff!);
+        applySync(m.model, m.diff!, m.note);
         break;
       }
       app.classList.remove('busy');

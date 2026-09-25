@@ -353,6 +353,30 @@ export class GraphSession {
   }
 
   /**
+   * Re-read issues right after an edit. A direct read when the source has one: the search index
+   * can lag behind a write for a few seconds. Returns the keys whose data changed.
+   */
+  async refresh(keys: string[], signal?: AbortSignal): Promise<string[]> {
+    const got: RawIssue[] = [];
+    if (this.issues.issue) {
+      for (const k of keys) got.push(await this.issues.issue(k, this.fields, signal));
+    } else {
+      got.push(...(await this.searchTolerant(keys, signal)));
+    }
+    const changed: string[] = [];
+    for (const i of got) {
+      const prev = this.raw.get(i.key);
+      if (prev && JSON.stringify(prev.fields) === JSON.stringify(i.fields)) continue;
+      changed.push(i.key);
+      this.add([i]);
+      if (this.index.has(i.key)) this.index.set(i.key, i);
+      if (this.outside.has(i.key)) this.outside.set(i.key, i);
+    }
+    if (this.scoped && this.index.size) this.selection = select([...this.index.values()], this.scoped, { sprintField: this.opts.sprintField, epicLinkField: this.opts.epicLinkField });
+    return changed;
+  }
+
+  /**
    * Incremental sync. One cheap query for everything updated since the cursor (minus an overlap),
    * then full fetches only for issues that really changed or newly belong to the graph.
    * Every `presenceIntervalMs` (or when forced) also checks that loaded issues still exist.
@@ -764,6 +788,10 @@ export class GraphSession {
       truncated: !!truncation,
       truncation,
       scopeInfo: this.scopeInfo(),
+      editable: {
+        status: !!(this.issues.transitions && this.issues.transition),
+        sprint: !!(this.opts.sprintField && this.issues.sprints && this.issues.moveToSprint),
+      },
       fetchedAt: new Date().toISOString(),
     };
   }

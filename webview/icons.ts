@@ -33,6 +33,8 @@ export const UI_ICONS = {
   target: svg('<circle cx="8" cy="8" r="5.8"/><circle cx="8" cy="8" r="2.6"/><circle cx="8" cy="8" r=".6" fill="currentColor"/>'),
   info: svg('<circle cx="8" cy="8" r="6"/><path d="M8 7.2v4"/><circle cx="8" cy="4.9" r=".6" fill="currentColor"/>'),
   more: svg('<circle cx="3.5" cy="8" r="1.1" fill="currentColor"/><circle cx="8" cy="8" r="1.1" fill="currentColor"/><circle cx="12.5" cy="8" r="1.1" fill="currentColor"/>'),
+  status: svg('<path d="M2.5 8h9M8.5 4.5 12 8l-3.5 3.5"/><path d="M14 3v10"/>'),
+  sprint: svg('<rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/>'),
   check: svg('<path d="m3.5 8.5 3 3 6-7"/>'),
   warn: svg('<path d="M8 2 14.5 13.5h-13z"/><path d="M8 6.5v3M8 11.6v.1"/>'),
 };

@@ -1,4 +1,4 @@
-import { IssueSource, RawIssue, SearchPage } from './types';
+import { IssueSource, IssueTransition, RawIssue, SearchPage, SprintOption } from './types';
 
 export type Deployment = 'cloud' | 'server';
 
@@ -62,7 +62,9 @@ export class JiraClient implements IssueSource {
       }
       throw new JiraError(`Jira ${res.status}: ${detail}`, res.status);
     }
-    return (await res.json()) as T;
+    // Writes (transitions, sprint moves) answer 204 No Content.
+    const text = await res.text();
+    return (text ? JSON.parse(text) : undefined) as T;
   }
 
   async myself(): Promise<{ displayName: string }> {
@@ -88,6 +90,69 @@ export class JiraClient implements IssueSource {
       signal,
     );
     return { html: res.renderedFields?.description ?? '', updated: res.fields.updated };
+  }
+
+  async issue(key: string, fields: string[], signal?: AbortSignal): Promise<RawIssue> {
+    return this.request('GET', `/rest/api/${this.apiVersion}/issue/${encodeURIComponent(key)}?fields=${fields.map(encodeURIComponent).join(',')}`, undefined, signal);
+  }
+
+  async transitions(key: string): Promise<IssueTransition[]> {
+    const res = await this.request<{ transitions: { id: string; name: string; to: { name: string; statusCategory?: { key: string } } }[] }>(
+      'GET',
+      `/rest/api/${this.apiVersion}/issue/${encodeURIComponent(key)}/transitions`,
+    );
+    return res.transitions.map((t) => ({ id: t.id, name: t.name, to: { name: t.to.name, category: t.to.statusCategory?.key ?? 'new' } }));
+  }
+
+  async transition(key: string, transitionId: string): Promise<void> {
+    await this.request('POST', `/rest/api/${this.apiVersion}/issue/${encodeURIComponent(key)}/transitions`, { transition: { id: transitionId } });
+  }
+
+  /** Scrum boards per project, cached: listing them is slow and they rarely change. */
+  private readonly boards = new Map<string, Promise<{ id: number; name: string }[]>>();
+
+  private projectBoards(project: string): Promise<{ id: number; name: string }[]> {
+    let p = this.boards.get(project);
+    if (!p) {
+      p = (async () => {
+        const out: { id: number; name: string }[] = [];
+        for (let startAt = 0; ; startAt += 50) {
+          const page = await this.request<{ values: { id: number; name: string }[]; isLast?: boolean }>(
+            'GET',
+            `/rest/agile/1.0/board?projectKeyOrId=${encodeURIComponent(project)}&type=scrum&maxResults=50&startAt=${startAt}`,
+          );
+          out.push(...page.values);
+          if (page.isLast !== false || page.values.length === 0) return out;
+        }
+      })();
+      p.catch(() => this.boards.delete(project));
+      this.boards.set(project, p);
+    }
+    return p;
+  }
+
+  async sprints(key: string): Promise<SprintOption[]> {
+    const boards = await this.projectBoards(key.replace(/-\d+$/, ''));
+    const byId = new Map<number, SprintOption>();
+    for (const b of boards) {
+      let res: { values: { id: number; name: string; state: string }[] };
+      try {
+        res = await this.request('GET', `/rest/agile/1.0/board/${b.id}/sprint?state=active,future&maxResults=50`);
+      } catch (e) {
+        if (e instanceof JiraError && e.status === 400) continue; // board without sprints enabled
+        throw e;
+      }
+      for (const s of res.values) {
+        const state = s.state.toLowerCase();
+        if ((state === 'active' || state === 'future') && !byId.has(s.id)) byId.set(s.id, { id: s.id, name: s.name, state, board: b.name });
+      }
+    }
+    return [...byId.values()];
+  }
+
+  async moveToSprint(key: string, sprintId: number | undefined): Promise<void> {
+    const path = sprintId === undefined ? '/rest/agile/1.0/backlog/issue' : `/rest/agile/1.0/sprint/${sprintId}/issue`;
+    await this.request('POST', path, { issues: [key] });
   }
 
   /** Cloud bulk fetch reports existing issues only; anything missing is deleted or no longer visible. */

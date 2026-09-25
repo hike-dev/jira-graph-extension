@@ -151,6 +151,18 @@
         "icon": "$(add)"
       },
       {
+        "command": "jiraGraph.changeStatus",
+        "title": "Change Status…",
+        "category": "Jira Graph",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "jiraGraph.moveToSprint",
+        "title": "Move to Sprint…",
+        "category": "Jira Graph",
+        "icon": "$(calendar)"
+      },
+      {
         "command": "jiraGraph.graphFromIssue",
         "title": "New Graph from Issue",
         "category": "Jira Graph",
@@ -331,6 +343,16 @@
           "group": "2_graph@2"
         },
         {
+          "command": "jiraGraph.changeStatus",
+          "when": "view == jiraGraph.issues && viewItem == issue",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "jiraGraph.moveToSprint",
+          "when": "view == jiraGraph.issues && viewItem == issue",
+          "group": "2_edit@2"
+        },
+        {
           "command": "jiraGraph.copyKey",
           "when": "view == jiraGraph.issues",
           "group": "3_copy@1"
@@ -357,6 +379,14 @@
         },
         {
           "command": "jiraGraph.graphFromIssue",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.changeStatus",
+          "when": "false"
+        },
+        {
+          "command": "jiraGraph.moveToSprint",
           "when": "false"
         },
         {

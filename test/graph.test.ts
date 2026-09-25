@@ -547,3 +547,34 @@ test('session snapshot: restore without requests, re-scope locally, then catch u
   // Demo graphs are never cached.
   assert.equal(new GraphSession(src, { kind: 'demo' }, opts).cacheKey(), undefined);
 });
+
+test('edits: transition and sprint move write to the source, refresh redraws only what changed', async () => {
+  const src = new DemoSource();
+  const s = new GraphSession(src, { kind: 'demo' }, opts);
+  await s.load(() => {});
+  assert.deepEqual(s.toModel().editable, { status: true, sprint: true });
+  assert.deepEqual(new GraphSession(src, { kind: 'demo' }, { ...opts, sprintField: undefined }).toModel().editable, { status: true, sprint: false });
+
+  const t = await src.transitions('SHOP-12');
+  const prog = t.find((x) => x.to.name === 'In Progress')!;
+  await src.transition('SHOP-12', prog.id);
+  assert.deepEqual(await s.refresh(['SHOP-12']), ['SHOP-12']);
+  const i = s.toModel().issues.find((x) => x.key === 'SHOP-12')!;
+  assert.equal(i.status, 'In Progress');
+  assert.equal(i.statusCategory, 'indeterminate');
+  assert.deepEqual(await s.refresh(['SHOP-12']), [], 'nothing new on a second read');
+
+  // Sprint moves keep closed sprints as history; the backlog removes the open one.
+  const sprints = await src.sprints();
+  await src.moveToSprint('SHOP-13', sprints.find((x) => x.state === 'future')!.id);
+  await s.refresh(['SHOP-13']);
+  assert.deepEqual(s.toModel().issues.find((x) => x.key === 'SHOP-13')!.sprints, [{ name: 'SHOP Sprint 13', state: 'closed' }, { name: 'SHOP Sprint 15', state: 'future' }]);
+  await src.moveToSprint('SHOP-13', undefined);
+  await s.refresh(['SHOP-13']);
+  assert.deepEqual(s.toModel().issues.find((x) => x.key === 'SHOP-13')!.sprints, [{ name: 'SHOP Sprint 13', state: 'closed' }]);
+  await assert.rejects(src.moveToSprint('SHOP-111', sprints[0].id), /sub-task/i);
+
+  // The next sync sees the refreshed version and does not report the edit again.
+  const r = await s.sync();
+  assert.ok(!r.changed.includes('SHOP-12') && !r.changed.includes('SHOP-13'), `sync changed: ${r.changed}`);
+});

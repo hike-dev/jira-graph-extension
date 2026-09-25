@@ -118,6 +118,8 @@ export interface GraphModel {
   truncated: boolean;
   truncation?: Truncation;
   scopeInfo?: ScopeInfo;
+  /** Which edits the source supports (sprint also needs `jiraGraph.sprintField`). */
+  editable?: { status: boolean; sprint: boolean };
   fetchedAt: string;
 }
 
@@ -139,7 +141,7 @@ export interface ViewOptions {
 }
 
 export type HostMessage =
-  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' | 'sync'; diff?: SyncDiff; cachedAt?: number }
+  | { type: 'graph'; model: GraphModel; options: ViewOptions; reason: 'init' | 'update' | 'sync'; diff?: SyncDiff; cachedAt?: number; note?: string }
   | { type: 'syncState'; phase: 'paused' | 'idle' | 'cooldown' | 'off'; lastSyncAt?: number; nextRunAt?: number; syncing?: boolean; error?: string }
   | { type: 'loading'; message: string }
   | { type: 'error'; message: string }
@@ -169,7 +171,9 @@ export type WebviewMessage =
   | { type: 'copyMermaid' }
   | { type: 'raiseLimit'; to: number }
   | { type: 'setScope'; scope: ScopeConfig }
-  | { type: 'loadMore'; parent: string };
+  | { type: 'loadMore'; parent: string }
+  | { type: 'changeStatus'; key: string }
+  | { type: 'changeSprint'; key: string };
 
 export function linkCategory(name: string, label: string): LinkCategory {
   const s = `${name} ${label}`.toLowerCase();

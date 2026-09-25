@@ -97,11 +97,15 @@ Interactive dependency graph of Jira tickets inside VS Code, laid out with [ELK]
 - **Tooltips** everywhere else, in VS Code's hover style with shortcut keys: toolbar controls (the selectors list every option, with the current one highlighted), legend rows, links, collapse and load buttons, and the live-sync status.
 - **More menu** (⋯): link labels, hide done, links shape the layout, minimap, edge routing, collapse and expand all.
 - **Details drawer** (resizable: drag its left edge, double-click to reset, arrow keys when focused; width remembered): status, priority, assignee, labels, parent, children and relations grouped by type, with action buttons.
-- **Context menu**: open in Jira, load relations, focus, new graph from here, collapse, copy key or link, hide.
+- **Change status and sprint** without leaving the graph: from the details drawer (click the status pill, or *Move…* next to the sprints), the context menu, the Graph Issues tree, or <kbd>S</kbd> / <kbd>M</kbd> on the selected ticket.
+  - *Status* lists the transitions Jira offers the ticket right now. A transition whose screen requires fields (e.g. a resolution) fails with Jira's message and an *Open in Jira* button.
+  - *Sprint* lists the active and future sprints of the project's scrum boards, plus *Backlog*. Closed sprints stay in the ticket's history, as in Jira. Sub-tasks follow their parent and can't be moved on their own. Needs `jiraGraph.sprintField`.
+  - Afterwards the ticket is re-read directly (not through the search index, which can lag) and redrawn in place with a flash. The layout changes only if the edit changes the structure.
+- **Context menu**: open in Jira, load relations, change status, move to sprint, focus, new graph from here, collapse, copy key or link, hide.
 - **Keyboard:**
   - `/` filter · `F3` / `Shift+F3` next / previous match · `F` fit · `+`/`-`/`0` zoom · `L` / `Shift+L` cycle lens
   - arrows move the selection spatially
-  - `Enter` details · `Cmd/Ctrl+Enter` Jira · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `Esc` clears
+  - `Enter` details · `Cmd/Ctrl+Enter` Jira · `E` expands · `Space` collapses · `H` hides · `I` ticket card · `S` change status · `M` move to sprint · `Esc` clears
 - **Export:**
   - standalone themed **SVG**
   - **Mermaid** (paste into PRs, Confluence or Markdown)
@@ -230,7 +234,7 @@ Open graphs stay current without re-fetching everything.
 src/                       extension host (Node)
   extension.ts             commands, tree views, status bar, serializer
   config.ts                settings + SecretStorage auth flow
-  jira/client.ts           REST client: Cloud /rest/api/3/search/jql (token paging) and Server /rest/api/2/search
+  jira/client.ts           REST client: Cloud /rest/api/3/search/jql (token paging) and Server /rest/api/2/search; transitions; sprints via /rest/agile/1.0
   jira/graphSession.ts     BFS expansion (links, parents, children), stubs, batching, maxIssues
   jira/demoSource.ts       offline dataset with a tiny JQL interpreter
   views/graphPanel.ts      webview panel lifecycle and message protocol

@@ -42,7 +42,8 @@ Parked ideas and open questions, roughly by priority within each section.
 - [ ] Critical path along `blocks` chains; swimlanes by assignee / sprint / component (ELK partitioning).
 
 ## Product
-- [ ] Edit from the graph: drag to create a link, transition status, reparent by drop.
+- [x] Edit from the graph: transition status, move to sprint / backlog.
+- [ ] Edit from the graph: drag to create a link, reparent by drop; transition screens with required fields (resolution) in the graph.
 - [ ] Hover / CodeLens for issue keys in code and commit messages.
 - [ ] Health lint: done parent with open children, stale in-progress work, orphans, missing estimates.
 - [ ] Saved views (filters, lens, strategy, collapsed state) next to saved queries.
