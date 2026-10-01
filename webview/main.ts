@@ -922,9 +922,20 @@ function applyClasses() {
   }
   const inSet = (set: Map<string, number>, id: string) => set.has(id) || !!fanMembers.get(id)?.some((m) => set.has(m));
   const isFocus = (id: string) => id === focusKey || fanOf.get(focusKey ?? '') === id;
+  // A parent's whole subtree stays lit: hovering an epic must not dim its own stories and sub-tasks.
+  const subtree = new Set<string>();
+  if (focusKey) {
+    const stack = [...(childrenOf.get(focusKey) ?? [])];
+    while (stack.length) {
+      const k = stack.pop()!;
+      if (subtree.has(k)) continue;
+      subtree.add(k);
+      stack.push(...(childrenOf.get(k) ?? []));
+    }
+  }
   if (focusKey) {
     related.add(focusKey);
-    for (const k of [...chain.up.keys(), ...chain.down.keys()]) related.add(k);
+    for (const k of [...chain.up.keys(), ...chain.down.keys(), ...subtree]) related.add(k);
     layers.edges.querySelectorAll<SVGGElement>('.g-edge').forEach((e) => {
       const parent = byKey.get(focusKey)?.parentKey;
       const toGrid = !!parent && e.dataset.to === `__grid:${parent}`;
@@ -933,7 +944,8 @@ function applyClasses() {
       const inChain =
         e.classList.contains('k-blocks') &&
         ((inSet(chain.up, f) && (isFocus(t) || inSet(chain.up, t))) || ((isFocus(f) || inSet(chain.down, f)) && inSet(chain.down, t)));
-      const hit = isFocus(f) || isFocus(t) || toGrid || inChain;
+      const inSubtree = e.classList.contains('k-hierarchy') && (isFocus(f) || subtree.has(f)) && (subtree.has(t) || t.startsWith('__grid:'));
+      const hit = isFocus(f) || isFocus(t) || toGrid || inChain || inSubtree;
       e.classList.toggle('hl', hit);
       e.classList.toggle('chain', inChain);
       if (hit) for (const id of [f, t]) fanMembers.get(id)?.forEach((m) => related.add(m));
