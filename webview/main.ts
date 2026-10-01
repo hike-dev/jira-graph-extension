@@ -933,6 +933,11 @@ function applyClasses() {
       stack.push(...(childrenOf.get(k) ?? []));
     }
   }
+  /** The focused ticket or anything in its subtree, incl. packed grids (`__grid:<parent>`) and fan clusters. */
+  const touches = (id: string) => {
+    const k = id.replace(/^__grid:/, '');
+    return isFocus(k) || subtree.has(k) || !!fanMembers.get(id)?.some((m) => subtree.has(m));
+  };
   if (focusKey) {
     related.add(focusKey);
     for (const k of [...chain.up.keys(), ...chain.down.keys(), ...subtree]) related.add(k);
@@ -944,15 +949,15 @@ function applyClasses() {
       const inChain =
         e.classList.contains('k-blocks') &&
         ((inSet(chain.up, f) && (isFocus(t) || inSet(chain.up, t))) || ((isFocus(f) || inSet(chain.down, f)) && inSet(chain.down, t)));
-      const inSubtree = e.classList.contains('k-hierarchy') && (isFocus(f) || subtree.has(f)) && (subtree.has(t) || t.startsWith('__grid:'));
-      const hit = isFocus(f) || isFocus(t) || toGrid || inChain || inSubtree;
+      // Every relation of the subtree counts as the parent's own (parent → child edges, links, packed grids).
+      const hit = touches(f) || touches(t) || toGrid || inChain;
       e.classList.toggle('hl', hit);
       e.classList.toggle('chain', inChain);
       if (hit) for (const id of [f, t]) fanMembers.get(id)?.forEach((m) => related.add(m));
       if (hit) related.add(e.dataset.from!), related.add(e.dataset.to!);
     });
     layers.labels.querySelectorAll<SVGGElement>('.g-elabel').forEach((e) =>
-      e.classList.toggle('hl', isFocus(e.dataset.from!) || isFocus(e.dataset.to!)),
+      e.classList.toggle('hl', touches(e.dataset.from!) || touches(e.dataset.to!)),
     );
   } else {
     layers.edges.querySelectorAll('.hl').forEach((e) => e.classList.remove('hl', 'chain'));
